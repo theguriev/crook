@@ -1,8 +1,8 @@
 {
   "agents": {
-    "claude": "behind 6b2a55f742d2",
-    "codex": "missing",
-    "copilot": "connected 0.1.39"
+    "claude": "missing",
+    "codex": "behind 0.1.30",
+    "copilot": "connected"
   },
   "claude_updates": false,
   "hint": "claude"

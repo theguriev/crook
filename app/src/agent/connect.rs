@@ -176,6 +176,28 @@ pub fn located(search: &SearchPath) -> Vec<Located> {
         .collect()
 }
 
+/// How a line names `located`'s program to `shell`: by its absolute path,
+/// quoted where it needs it, for the shells whose quoting Crook speaks — sh,
+/// bash, zsh, fish and their kin — and as [`Located::typed`] for any other.
+///
+/// By its path, because the name is whatever the person's shell makes of
+/// it: an alias, a function or a fish abbreviation called `claude` — one
+/// that adds flags of its own, say — or another `claude` earlier on the
+/// pane's `PATH` than the one this page asked. The path is the program the
+/// page asked, and the one that runs.
+pub fn typed_as(located: &Located, shell: &OsStr) -> String {
+    let posix = matches!(
+        program_name(shell).as_str(),
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "mksh" | "ash"
+    );
+    match (posix, located.file.to_str()) {
+        (true, Some(path)) if super::plain(path) => path.to_owned(),
+        #[cfg(not(windows))]
+        (true, Some(path)) => crate::plugins::wasm::quote(path),
+        _ => located.typed.clone(),
+    }
+}
+
 /// The file in `directory` a shell would run for `name`, if there is one.
 #[cfg(unix)]
 fn program_file(directory: &Path, name: &str) -> Option<PathBuf> {
@@ -294,6 +316,12 @@ pub fn standing(listed: &Listed, running: &str) -> Standing {
     }
 }
 
+/// Whether `version` is a release's, `0.1.39`, which a copy can be compared
+/// by: not `local`, `unknown` or a commit.
+pub fn is_a_version(version: &str) -> bool {
+    numbers(version).is_some()
+}
+
 /// `0.1.39` as three numbers, or `None` for what is not a version.
 fn numbers(version: &str) -> Option<[u64; 3]> {
     let core = version.trim().trim_start_matches('v');
@@ -310,48 +338,92 @@ fn is_a_commit(version: &str) -> bool {
 }
 
 /// Asks the agent at `file` what it has installed: its own `plugin list
-/// --json`, run with nothing on stdin and given [`LOOK_TIMEOUT`].
+/// --json`, run in `home` with nothing on stdin, and given
+/// [`LOOK_TIMEOUT`] to answer.
 ///
 /// Read-only, and the agent's own: Crook opens none of its files. It runs
-/// on the pool. `environment` is laid over Crook's own, for a test's scratch
-/// home.
-pub fn look(file: &Path, environment: &[(String, String)]) -> Result<Listed, String> {
+/// on the pool. In `home` rather than wherever Crook was started, because
+/// that is where the commands a press runs are run, and an agent's answer
+/// depends on where it is asked: Claude Code lists a project's own
+/// `enabledPlugins` beside the person's, and a mise shim refuses to run at
+/// all in a directory whose `mise.toml` it was never told to trust.
+/// `environment` is laid over Crook's own, for a test's scratch home.
+pub fn look(file: &Path, home: &Path, environment: &[(String, String)]) -> Result<Listed, String> {
+    look_within(file, home, environment, LOOK_TIMEOUT)
+}
+
+/// [`look`], given `patience` rather than [`LOOK_TIMEOUT`].
+///
+/// The whole of it is under the one deadline: the agent's exit and the end
+/// of its output both. A wrapper — an npm shim, a mise shim, a script — can
+/// exit while something it started holds the output open, and a wait for
+/// that end with no deadline was a look that never answered and a worker on
+/// the pool held with it. So the agent runs in a process group of its own,
+/// and a look that runs out of time ends the whole group, whatever the
+/// agent started, which is also what closes the output for the thread
+/// reading it. On Windows there is no group to end: the agent is killed,
+/// what it started may live on, and the look answers at the deadline all
+/// the same.
+fn look_within(
+    file: &Path,
+    home: &Path,
+    environment: &[(String, String)],
+    patience: Duration,
+) -> Result<Listed, String> {
     let program = file
         .to_str()
         .ok_or_else(|| format!("its path is not UTF-8: {}", file.display()))?;
-    let mut child = crate::process::command(program)
+    let mut command = crate::process::command(program);
+    command
         .args(["plugin", "list", "--json"])
+        .current_dir(home)
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", file.display()))?;
+    let deadline = Instant::now() + patience;
+    let late = || format!("it did not answer in {} seconds", patience.as_secs());
+
     // Read beside the wait, so a list longer than a pipe holds cannot keep
-    // the agent from exiting.
+    // the agent from exiting; handed back over a channel, so the read has the
+    // deadline the wait has.
     let mut stdout = child.stdout.take().ok_or("no output to read")?;
-    let reading = std::thread::spawn(move || {
+    let (said_tx, said_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut said = String::new();
         let _ = stdout.read_to_string(&mut said);
-        said
+        let _ = said_tx.send(said);
     });
-    let started = Instant::now();
+
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() > LOOK_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "it did not answer in {} seconds",
-                    LOOK_TIMEOUT.as_secs()
-                ));
+            Ok(None) if Instant::now() >= deadline => {
+                end_the_group(&mut child);
+                return Err(late());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                end_the_group(&mut child);
+                return Err(error.to_string());
+            }
         }
     };
-    let said = reading.join().unwrap_or_default();
+    let said = match said_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(said) => said,
+        Err(_) => {
+            end_the_group(&mut child);
+            return Err(late());
+        }
+    };
     if !status.success() {
         return Err(match status.code() {
             Some(code) => format!("its plugin list ended with status {code}"),
@@ -359,6 +431,27 @@ pub fn look(file: &Path, environment: &[(String, String)]) -> Result<Listed, Str
         });
     }
     read_list(&said).ok_or_else(|| String::from("its plugin list said something Crook cannot read"))
+}
+
+/// Ends the look's agent and, on Unix, everything in its process group.
+///
+/// By the shell's own `kill`, since nothing in this crate binds the system
+/// call: `kill -KILL -- -<group>`, the group being the agent's own id, as
+/// [`look_within`] started it. The group outlives an agent that has already
+/// exited for as long as anything it started is still in it.
+fn end_the_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = crate::process::command("/bin/sh")
+            .args(["-c", "kill -KILL -- \"$0\"", &group])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Whether Claude Code updates the `crook` marketplace by itself, as far as

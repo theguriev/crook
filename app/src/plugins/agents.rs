@@ -56,6 +56,12 @@ impl Plugin for Agents {
             let agent = workspace.host().said();
             workspace.not_now_connecting(&agent, ctx);
         });
+        // The hint's own Dismiss, when it says why a connected agent reports
+        // nothing: down for this window, and nothing kept.
+        host.register_answer(action("dismiss"), |workspace, ctx| {
+            let agent = workspace.host().said();
+            workspace.dismiss_the_hint(&agent, ctx);
+        });
         host.register_answer(action("check"), |workspace, ctx| {
             workspace.look_at_agents(true, ctx);
         });
@@ -119,6 +125,7 @@ fn agents(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
                     rows.extend(auto_update_row(workspace));
                 }
             }
+            rows.push(check_again_row(workspace));
         }
     }
 
@@ -168,7 +175,8 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
     let agent = located.agent;
     let program = crate::agent::program(agent).unwrap_or(agent);
     let shell = workspace.shell_for_new_panes(app);
-    let line = |step| connect::line(agent, step, &located.typed, shell.as_os_str());
+    let typed = connect::typed_as(located, shell.as_os_str());
+    let line = |step| connect::line(agent, step, &typed, shell.as_os_str());
 
     let (said, press): (String, Option<(&str, &str)>) = match connections.outcome(agent) {
         // Its button shows the tab rather than running anything again: a
@@ -187,7 +195,9 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
                 },
             )),
         ),
-        Some(Outcome::Failed { step, title, exit }) => {
+        Some(Outcome::Failed {
+            step, title, exit, ..
+        }) => {
             let ended = match exit {
                 Some(code) => format!("ended with status {code}"),
                 None => String::from("did not finish"),
@@ -218,13 +228,21 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
                 Some(("Connect", "connect")),
             ),
             Some(Looked::Said(Standing::Connected { version })) => (
-                match version {
+                match version
+                    .as_deref()
+                    .filter(|version| connect::is_a_version(version))
+                {
                     Some(version) => format!(
                         "Connected: Crook\u{2019}s plugin {version}. Sessions started since it \
                          was installed report to Crook."
                     ),
-                    None => String::from(
-                        "Connected. Sessions started since it was installed report to Crook.",
+                    // Codex names a copy from a checkout `local`, and
+                    // Copilot names none: nothing to compare with this Crook.
+                    None => format!(
+                        "Connected. Sessions started since it was installed report to Crook. \
+                         {program} does not say which version of the plugin it has, so Crook \
+                         cannot tell whether it is behind: Update brings it up to date either \
+                         way."
                     ),
                 },
                 Some(("Update", "update")),
@@ -312,4 +330,27 @@ fn auto_update_row(workspace: &Workspace) -> Option<Entry> {
         Empty::new().finish(),
         ui,
     ))
+}
+
+/// The press that asks every agent's list again, now: for a row whose tab
+/// never said how it ended, an agent changed by hand since the page asked,
+/// or an answer that did not come.
+fn check_again_row(workspace: &Workspace) -> Entry {
+    let ui = workspace.fonts().ui;
+    widgets::row(
+        Words::new("Ask the agents again")
+            .with_description(
+                "Runs each agent\u{2019}s own read-only plugin list once more. The page asks by \
+                 itself when it is opened, and no more than once a minute.",
+            )
+            .with_keywords(&["check", "refresh", "again", "reload", "plugin", "list"]),
+        true,
+        widgets::text_button(
+            "Check again",
+            workspace.run_about(&action("check"), ""),
+            workspace.settings_page().control(named("agents.check")),
+            ui,
+        ),
+        ui,
+    )
 }

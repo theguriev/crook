@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -171,6 +172,45 @@ fn a_line_runs_every_command_and_names_the_program_as_found() {
 }
 
 #[test]
+fn a_posix_shell_is_given_the_programs_path_and_any_other_its_word() {
+    let located = |file: &str| Located {
+        agent: "claude",
+        file: file.into(),
+        typed: "claude".into(),
+    };
+    assert_eq!(
+        typed_as(
+            &located("/home/me/.local/bin/claude"),
+            OsStr::new("/bin/zsh")
+        ),
+        "/home/me/.local/bin/claude"
+    );
+    assert_eq!(
+        typed_as(&located("/usr/bin/claude"), OsStr::new("/usr/bin/fish")),
+        "/usr/bin/claude"
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        typed_as(
+            &located("/home/me/my tools/it's/claude"),
+            OsStr::new("/bin/bash")
+        ),
+        "'/home/me/my tools/it'\\''s/claude'"
+    );
+    assert_eq!(
+        typed_as(&located("/usr/bin/claude"), OsStr::new("/usr/bin/nu")),
+        "claude"
+    );
+    assert_eq!(
+        typed_as(
+            &located(r"C:\Users\me\claude.cmd"),
+            OsStr::new(r"C:\Windows\System32\cmd.exe")
+        ),
+        "claude"
+    );
+}
+
+#[test]
 fn every_agent_with_a_plugin_can_be_brought_up_to_date() {
     for agent in AGENTS {
         assert_eq!(
@@ -283,6 +323,7 @@ fn the_look_runs_the_agents_own_list_and_reads_it() {
 
     let listed = look(
         &agent,
+        scratch.path(),
         &[(String::from("LISTED"), CLAUDE_LISTED.to_owned())],
     );
     assert_eq!(
@@ -297,7 +338,11 @@ fn the_look_runs_the_agents_own_list_and_reads_it() {
         "plugin list --json "
     );
 
-    let unreadable = look(&agent, &[(String::from("LISTED"), String::from("nope"))]);
+    let unreadable = look(
+        &agent,
+        scratch.path(),
+        &[(String::from("LISTED"), String::from("nope"))],
+    );
     assert!(unreadable.is_err(), "{unreadable:?}");
 }
 
@@ -308,8 +353,76 @@ fn a_list_that_fails_is_no_answer() {
     let agent = scratch.path().join("claude");
     crate::process::write_program(&agent, "#!/bin/sh\necho '[]'\nexit 3\n");
     assert_eq!(
-        look(&agent, &[]),
+        look(&agent, scratch.path(), &[]),
         Err(String::from("its plugin list ended with status 3"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_look_asks_in_the_home_directory_not_where_crook_was_started() {
+    // Where an agent is asked changes what it says: a project's own
+    // plugins, and a mise shim that refuses an untrusted mise.toml.
+    let scratch = Scratch::new("look-home");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let agent = scratch.path().join("claude");
+    let asked_in = scratch.path().join("asked-in");
+    crate::process::write_program(
+        &agent,
+        &format!("#!/bin/sh\npwd -P > '{}'\necho '[]'\n", asked_in.display()),
+    );
+    assert_eq!(look(&agent, &home, &[]), Ok(Listed::Missing));
+    assert_eq!(
+        std::fs::read_to_string(&asked_in).unwrap().trim(),
+        std::fs::canonicalize(&home).unwrap().display().to_string()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_that_never_answers_is_given_up_on_at_the_deadline() {
+    let scratch = Scratch::new("look-hangs");
+    let agent = scratch.path().join("claude");
+    crate::process::write_program(&agent, "#!/bin/sh\nsleep 30\necho '[]'\n");
+    let started = Instant::now();
+    let said = look_within(&agent, scratch.path(), &[], Duration::from_secs(1));
+    assert_eq!(said, Err(String::from("it did not answer in 1 seconds")));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_wrapper_that_exits_while_its_child_holds_the_output_is_ended_with_the_child() {
+    // The agent exits at once, having answered; something it started keeps
+    // the output open. The read is under the deadline too, and what the
+    // agent started is ended with it rather than left running.
+    let scratch = Scratch::new("look-wrapper");
+    let agent = scratch.path().join("claude");
+    let survived = scratch.path().join("survived");
+    crate::process::write_program(
+        &agent,
+        &format!(
+            "#!/bin/sh\n(sleep 3; touch '{}') &\necho '[]'\nexit 0\n",
+            survived.display()
+        ),
+    );
+    let started = Instant::now();
+    let said = look_within(&agent, scratch.path(), &[], Duration::from_secs(1));
+    assert_eq!(said, Err(String::from("it did not answer in 1 seconds")));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !survived.exists(),
+        "what the agent started outlived the look"
     );
 }
 
