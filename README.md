@@ -234,11 +234,34 @@ abort inside a system library ends the process without running any of Crook's co
 leaves no report. The log file is still there up to its last line, and the system's own crash
 reporter — `coredumpctl`, Console.app, the Event Viewer — has the rest.
 
+## Connect your agent
+
+Open **Settings › Agents** — or *Connect coding agents to Crook* in the palette — and press
+**Connect** beside Claude Code, Codex CLI or GitHub Copilot CLI. Crook opens a tab named for it
+and runs that agent's own plugin commands there, so you see every word that runs and what it
+printed; the row then says whether it worked. Crook installs nothing until you press, and
+edits none of the agent's files: the agent's own `plugin` commands do. That gives the tab its
+status, Claude Code's permission requests a card you can answer from, and the agent tools to
+open tabs (below).
+
+The page asks each agent what it has with its own read-only `plugin list --json` when it is
+shown. Where Crook's plugin is older than the Crook you run, the row offers **Update**, which
+runs the agent's update commands the same visible way. Claude Code updates the plugin by itself
+only once auto-update is on for the `crook` marketplace — its `/plugin` › Marketplaces › crook ›
+Enable auto-update — and has no command for that, so the page says how rather than editing
+Claude Code's `settings.json` for you.
+
+When an agent works in a pane and nothing it runs reports to Crook, a line under the header
+offers to connect it, once: **Connect**, or **Not now**, which is remembered. The Agents page
+turns these offers off. Rather do it by hand? `crook --agent-hooks claude` (or `codex`, or
+`copilot`) prints the same commands, and the hooks to merge yourself.
+
 ## Let Claude manage tabs (MCP)
 
 Crook's plugin for Claude Code gives Claude a handful of tools for the window it runs in: open
 a tab or split a pane that runs a command, list the panes, wait for one it opened to finish or
 to stop for you, read what a finished command printed, and close what it opened once it is done.
+**Connect** on the Agents page installs it ([above](#connect-your-agent)); by hand, it is:
 
 ```sh
 claude plugin marketplace add theguriev/crook

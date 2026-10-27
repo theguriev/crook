@@ -609,6 +609,62 @@ pub struct GeneralOptions {
     /// Whether running marks breathe and the caret blinks, or the window
     /// keeps still. See [`Motion`].
     pub motion: Motion,
+    /// Whether the window offers, under its header, to connect an agent it
+    /// sees at work in a pane whose hooks never report — Crook's plugin not
+    /// installed. On, because the offer is one line, made once, and answered
+    /// with a press; off, from the Agents page, for a person who connects
+    /// their agents some other way or not at all.
+    pub hint_to_connect_agents: bool,
+    /// The agents somebody answered that offer with "Not now" for, which it
+    /// is never made for again.
+    pub agents_not_connected: AgentsNotConnected,
+}
+
+/// The agents a person said "Not now" to connecting, by their names in
+/// [`crate::agent`]'s table: written as a list of those names.
+///
+/// A set of bits rather than a list, so [`GeneralOptions`] stays [`Copy`]:
+/// there are three agents with a plugin to connect, and a name the table no
+/// longer has is dropped on read.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentsNotConnected(u8);
+
+impl AgentsNotConnected {
+    /// The bit `agent` is kept under, for one of the agents Crook has a
+    /// plugin for.
+    fn bit(agent: &str) -> Option<u8> {
+        crate::agent::connect::connectable()
+            .position(|name| name == agent)
+            .map(|place| 1 << place)
+    }
+
+    /// Whether somebody said "Not now" for `agent`.
+    pub fn contains(self, agent: &str) -> bool {
+        Self::bit(agent).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// The same, with `agent` among them.
+    pub fn with(self, agent: &str) -> Self {
+        Self(self.0 | Self::bit(agent).unwrap_or(0))
+    }
+}
+
+impl Serialize for AgentsNotConnected {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let names: Vec<&str> = crate::agent::connect::connectable()
+            .filter(|name| self.contains(name))
+            .collect();
+        names.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentsNotConnected {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        Ok(names
+            .iter()
+            .fold(Self::default(), |kept, name| kept.with(name)))
+    }
 }
 
 /// How wide the tabs panel is until its edge is dragged: Warp's
@@ -638,6 +694,8 @@ impl Default for GeneralOptions {
             audible_bell: false,
             middle_click_paste: true,
             motion: Motion::System,
+            hint_to_connect_agents: true,
+            agents_not_connected: AgentsNotConnected::default(),
         }
     }
 }
@@ -3361,6 +3419,9 @@ mod tests {
         let owned = settings.owned();
         assert_eq!(
             vec![
+                // Crook's own: the agents somebody said "Not now" to
+                // connecting, which the window does not offer again.
+                "agents_not_connected",
                 // Crook's own: whether the window takes the questions agents'
                 // permission hooks hand it.
                 "answer_agents_from_crook",
@@ -3377,6 +3438,9 @@ mod tests {
                 // Crook's own: Warp keeps the terminal's type size in its
                 // appearance settings, which this file is not a copy of.
                 "font_size",
+                // Crook's own: whether the window offers to connect an agent
+                // it sees at work with no plugin reporting.
+                "hint_to_connect_agents",
                 "light_theme",
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
