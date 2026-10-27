@@ -66,6 +66,19 @@ Windows. Inside tmux it asks the window holding tmux's client, whichever window 
 tmux server, and the card says the agent is inside tmux. It needs Claude Code 2.1.280 or newer, and a Crook that knows `--agent ask`; an older
 one refuses it before reading anything, and the hook passes.
 
+`.mcp.json` declares one MCP server, `crook`, which Claude Code starts with the plugin and Copilot
+CLI through `mcpServers` in its manifest: `sh -c` running `"$CROOK_BIN" mcp`, or `crook mcp` from
+`PATH`, and exiting 1 with a line on stderr when there is neither, which the agent shows as a
+server that failed to start. `crook mcp` serves the control socket's verbs as tools —
+`crook_tab_new`, `crook_pane_split`, `crook_pane_list`, `crook_pane_wait`, `crook_pane_output`,
+`crook_pane_close` and `crook_events_wait` — asked as the pane the agent runs in, by the
+socket's own rules; none types into a pane and none answers a permission request. Outside a
+Crook pane it starts all the same, and every call says it is not in one. The variables are read
+by the shell rather than by the agent, so nothing in it is `${…}` for Claude Code to expand.
+Codex reads no MCP server from a plugin here: the README at the repository's root gives the
+lines for `~/.codex/config.toml`. `app/tests/command_line.rs` starts the server the way the file
+says, with the binary and without it.
+
 `skills/crook/SKILL.md` is the skill `crook --skill` prints, and all three load it.
 
 These are copies of what lives in `app/src`, and the tests in `app/src/agent.rs` fail when they

@@ -1033,6 +1033,20 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
         control::cli::events(args)?;
         return Ok(Startup::Answered);
     }
+    if args.next_if(|word| word == "mcp").is_some() {
+        if let Some(extra) = args.next() {
+            bail!(
+                "unrecognised argument {extra}; `crook mcp` takes none: it serves the Model \
+                 Context Protocol on standard input and output"
+            );
+        }
+        control::mcp::serve(
+            std::io::stdin().lock(),
+            std::io::stdout(),
+            control::mcp::Place::here(),
+        );
+        return Ok(Startup::Answered);
+    }
     if args.next_if(|word| word == "tab").is_some() {
         let printed = control::cli::tab(args)?;
         print_answer(format_args!("{}\n", printed.text))?;
@@ -1695,6 +1709,7 @@ USAGE:
     crook pane close <ID> [--json]
     crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--cwd <DIR>] [--json] -- <COMMAND>...
     crook events --follow [--pane <ID>]
+    crook mcp
 
 COMMANDS:
     pane list [--json] Ask the window this is run in which panes it has, over
@@ -1764,6 +1779,15 @@ COMMANDS:
                        the window ends it. A reader that falls behind is sent
                        a `lagged` line counting what it missed. Not on Windows
                        yet
+    mcp                Serve these commands as Model Context Protocol tools on
+                       standard input and output, for an agent's MCP client
+                       (Claude Code's plugin starts it): crook_tab_new,
+                       crook_pane_split, crook_pane_list, crook_pane_wait,
+                       crook_pane_output, crook_pane_close and
+                       crook_events_wait, asked as the pane it runs in, by the
+                       same rules. No tool types into a pane or answers an
+                       agent's permission request. Outside a Crook pane every
+                       call says so
 
 OPTIONS:
     -e <PROGRAM> [ARGS]...

@@ -330,6 +330,18 @@ its agent running or waiting, a command still running, a question asked (`workin
 pane the person is in (`focused`): Crook asks a person before a close ends work, and a command
 is never the one asked. Wait for it to finish first, or ask the person to close it.
 
+## The same, as tools
+
+Under Crook's plugin, Claude Code also has these as MCP tools, from `crook mcp`:
+`crook_tab_new`, `crook_pane_split`, `crook_pane_list`, `crook_pane_wait`,
+`crook_pane_output` (what `crook pane blocks` prints), `crook_pane_close` and
+`crook_events_wait`. When you have them, use them rather than the commands: a wait is one call
+that reports its progress, and what a pane printed comes back fenced as untrusted output. They
+are the same requests, asked as your pane, by the same rules — nothing more. A wait waits 55
+seconds unless you give `timeout_secs` (at most 600): when it says the pane did not get there,
+call it again. Outside a Crook pane every call says it is not in one. When the tools are not
+there, the commands above do the same.
+
 ## After Crook restarts
 
 Every Crook update is a restart, and a restart ends every process in the window, an agent's

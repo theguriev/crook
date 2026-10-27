@@ -2472,7 +2472,7 @@ lineage, the same eight panes on behalf of the pane a person opened, and the sam
 refusals. A split has no `worktree`: it shares its tab with the pane it is split off. Both verbs
 take a `cwd`, an absolute path the window takes as given — a look at the disk is not made
 between two frames, and a directory that has gone is one a shell falls back from as a restored
-pane's does — which the CLI checks is a directory before asking.
+pane's does — which the CLI and `crook mcp` check is a directory before asking.
 
 **`pane.close`** closes a pane the caller may watch, less its own, and its tab with it when it
 was the tab's last pane: what a lead does with a worker whose answer it has read. Refused as
@@ -2587,6 +2587,37 @@ encoder leaves as they are. A block's output printed as text keeps its newlines 
 every other control character the same way, and an event line is escaped as `--json` is.
 `crook pane split [--right|--down] [--beside ID] [--title T] [--cwd DIR] [--json] -- CMD…` prints
 the new pane's number as `tab new` does, and `crook pane close <ID> [--json]` prints `closed`.
+
+**`crook mcp`: the same verbs as MCP tools.** A stdio Model Context Protocol server — JSON-RPC
+2.0, a message a line, the log on stderr and nothing but JSON-RPC on stdout — that an agent's
+MCP client starts as its child, so it runs with the pane's `CROOK_SOCKET` and `CROOK_TOKEN` and
+asks as that pane: `crook_tab_new`, `crook_pane_split`, `crook_pane_list`, `crook_pane_wait`,
+`crook_pane_output` (`pane.blocks`), `crook_pane_close` and `crook_events_wait`. There is no
+second way into the window: each tool is one request through `cli::unix`, checked as the CLI
+checks the socket, and answered by the window's own rules, so an agent gains nothing it could
+not do with `crook tab new` and `crook pane …`. No tool types into a pane, none answers an
+agent's question — the socket has no verb that does — and the descriptions the model reads say
+both. It is hand-written on `serde_json` rather than an SDK: the protocol a stdio server needs is
+four methods and two notifications, every MCP crate pulls an async runtime this app does not
+have, and the dependency policy at the top of the workspace manifest is that a crate earns its
+place. Both eras are answered: `initialize` for the handshake revisions up to `2025-11-25`, and
+`server/discover` and per-request `_meta` for `2026-07-28`, with `-32022` for a version it does
+not speak. A tool call runs on a thread of its own, sixteen at once, so a wait does not hold up
+the calls behind it. A wait waits 55 seconds unless asked for longer, at most 600, and sends
+`notifications/progress` every ten seconds to a call that carried a `progressToken`, which most
+clients take as a reason not to cut it off; `notifications/cancelled` hangs its connection up,
+which the window hears as the client leaving, and so does the client closing standard input,
+after the calls answered at once have been. `crook_events_wait` keeps one `events.follow`
+connection from its first call on, holding up to 256 events between calls, so nothing is lost
+while the model is busy elsewhere. Every string in an answer has its escape sequences taken out
+and its other control and bidirectional characters written out, and a block's output comes
+between two fence lines tagged with eight random bytes, under a line that calls it untrusted
+program output. Outside a Crook pane — no `TERM_PROGRAM=Crook`, no `CROOK_PANE_ID` — the server
+still starts and lists its tools, and every call says it is not in a pane, so a plugin installed
+everywhere costs a session elsewhere nothing; on Windows every call says there is no socket yet.
+The Claude Code plugin declares it in `packaging/claude-code/.mcp.json`, started through `sh` as
+`$CROOK_BIN mcp` or `crook mcp` from `PATH`, and a missing binary is a server that failed to
+start, with a line on its stderr.
 
 ### Answering an agent
 

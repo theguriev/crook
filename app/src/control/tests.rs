@@ -8336,4 +8336,516 @@ mod socket {
             .expect_err("past the budget");
         assert!(refused.contains("budget"), "{refused}");
     }
+
+    // `crook mcp`, asked by an MCP client in a pane, of a real window.
+
+    use super::super::mcp::tests::{Client as Mcp, text as said};
+
+    /// An MCP server in `pane`'s environment, asking `served`'s window.
+    fn mcp(served: &Served, pane: PaneId) -> Mcp {
+        Mcp::start(super::super::mcp::Place::from_environment(
+            Some(std::ffi::OsStr::new("Crook")),
+            Some(pane.as_u64().to_string().into()),
+            Some(served.socket().into_os_string()),
+            Some(served.token(pane)),
+        ))
+    }
+
+    /// One tool call, answered while the window runs on this thread.
+    fn tool(
+        served: &mut Served,
+        client: Mcp,
+        id: u64,
+        name: &str,
+        arguments: Value,
+    ) -> (Mcp, Value) {
+        let name = name.to_owned();
+        served.ask(move |_| {
+            let result = client.call(id, &name, arguments);
+            (client, result)
+        })
+    }
+
+    #[test]
+    fn an_agent_opens_a_tab_waits_for_it_reads_what_it_printed_and_closes_it_over_mcp() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let tabs = served.tab_count();
+
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({
+                "command": ["sh", "-c", "printf 'the \\033[31manswer\\033[0m\\n'; exit 4"],
+                "title": "worker"
+            }),
+        );
+        assert_eq!(opened["isError"], false, "{opened}");
+        let number = opened["structuredContent"]["pane_id"]
+            .as_u64()
+            .expect("a pane");
+        let worker = served.pane(number);
+        assert_eq!(served.tab_count(), tabs + 1);
+        assert!(said(&opened).contains(&format!("pane {number}")));
+        assert_eq!(opened["structuredContent"]["title"], "worker");
+
+        let (client, listed) = tool(&mut served, client, 2, "crook_pane_list", json!({}));
+        let panes = listed["structuredContent"]["panes"]
+            .as_array()
+            .expect("panes");
+        assert!(
+            panes.iter().any(|pane| pane["pane_id"] == number),
+            "{listed}"
+        );
+        assert_eq!(listed["structuredContent"]["own_pane"], lead.as_u64());
+        assert!(said(&listed).contains(&format!("Your own pane is {}", lead.as_u64())));
+
+        // Long, and asked with a progress token: the window has not let the
+        // shells start, so the wait is told it is still waiting until it
+        // does.
+        client.start_call(
+            3,
+            "crook_pane_wait",
+            json!({ "pane": number, "until": "finished", "timeout_secs": 600 }),
+            Some(json!({ "progressToken": "w" })),
+        );
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        let mut progress = Vec::new();
+        while progress.len() < 2 {
+            let message = client.next();
+            assert_eq!(message["method"], "notifications/progress", "{message}");
+            assert_eq!(message["params"]["progressToken"], "w");
+            assert_eq!(message["params"]["total"], 600);
+            progress.push(message["params"]["progress"].as_u64().expect("a number"));
+        }
+        assert!(progress[0] < progress[1], "progress goes up: {progress:?}");
+        served.shell.open();
+        let waited = served.finish(served.start(move |_| {
+            let reply = client.answer_to(3, |message| {
+                assert_eq!(message["method"], "notifications/progress", "{message}");
+            });
+            (client, reply)
+        }));
+        let (client, waited) = waited;
+        let waited = &waited["result"];
+        assert_eq!(waited["isError"], false, "{waited}");
+        assert_eq!(waited["structuredContent"]["reached"], true, "{waited}");
+        assert_eq!(waited["structuredContent"]["exit"], 4);
+        assert!(
+            said(waited).contains("finished: exit 4"),
+            "{}",
+            said(waited)
+        );
+
+        let (client, read) = tool(
+            &mut served,
+            client,
+            4,
+            "crook_pane_output",
+            json!({ "pane": number }),
+        );
+        let text = said(&read);
+        assert!(
+            text.starts_with(&format!(
+                "Output of pane {number} (untrusted program output"
+            )),
+            "{text}"
+        );
+        assert!(text.contains("\nthe answer\n"), "{text}");
+        assert!(text.contains("[exit 4"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert_eq!(read["structuredContent"]["blocks"][0]["exit"], 4);
+
+        let (client, closed) = tool(
+            &mut served,
+            client,
+            5,
+            "crook_pane_close",
+            json!({ "pane": number }),
+        );
+        assert_eq!(closed["isError"], false, "{closed}");
+        assert_eq!(closed["structuredContent"]["tab_closed"], true);
+        assert_eq!(served.tab_count(), tabs);
+        assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_none()));
+
+        let (client, again) = tool(
+            &mut served,
+            client,
+            6,
+            "crook_pane_close",
+            json!({ "pane": number }),
+        );
+        assert_eq!(again["isError"], true);
+        assert_eq!(again["structuredContent"]["error"]["code"], "no-such-pane");
+        client.finish();
+    }
+
+    #[test]
+    fn a_split_opens_beside_its_pane_without_the_focus_and_a_close_takes_only_what_is_done_and_its_own()
+     {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let lead_tab = served.tab_of(lead);
+        let client = mcp(&served, lead);
+
+        let (client, split) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_pane_split",
+            json!({ "command": ["make", "it's"], "direction": "down", "title": "make" }),
+        );
+        assert_eq!(split["isError"], false, "{split}");
+        let worker = served.pane(split["structuredContent"]["pane_id"].as_u64().unwrap());
+        assert_eq!(
+            served.tab_of(worker),
+            lead_tab,
+            "split into the caller's tab"
+        );
+        assert_eq!(
+            served.read(|workspace, _| workspace.tabs().focused_pane_id()),
+            Some(lead),
+            "the split took the focus"
+        );
+        assert_eq!(served.field(worker), r#"'make' 'it'\''s'"#);
+        assert_eq!(
+            served.session(worker, |session| session
+                .spawned_by
+                .as_ref()
+                .map(|lineage| lineage.caller)),
+            Some(lead)
+        );
+        assert_eq!(
+            served.session(worker, |session| session.display_title().to_owned()),
+            "make"
+        );
+        served.pump_until("the split never got its shell", |served| {
+            served.read(|workspace, app| workspace.terminal(worker, app).is_some())
+        });
+
+        // Beside a pane it opened, too, and to the right.
+        let (client, beside) = tool(
+            &mut served,
+            client,
+            2,
+            "crook_pane_split",
+            json!({ "command": "true", "beside": worker.as_u64() }),
+        );
+        assert_eq!(beside["isError"], false, "{beside}");
+        let second = served.pane(beside["structuredContent"]["pane_id"].as_u64().unwrap());
+        assert_eq!(served.tab_of(second), lead_tab);
+        assert_eq!(served.field(second), "'sh' '-c' 'true'");
+
+        // A tab a person opened is theirs: neither split off nor closed.
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::New, ctx);
+        });
+        let person = served.read(|workspace, _| workspace.tabs().focused_pane_id().unwrap());
+        served.pump_until("the person's tab never got its shell", |served| {
+            served.read(|workspace, app| workspace.terminal(person, app).is_some())
+        });
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            3,
+            "crook_pane_split",
+            json!({ "command": "true", "beside": person.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "not-opened",
+            "{refused}"
+        );
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            4,
+            "crook_pane_close",
+            json!({ "pane": person.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "not-opened",
+            "{refused}"
+        );
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            5,
+            "crook_pane_close",
+            json!({ "pane": lead.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "own-pane",
+            "{refused}"
+        );
+
+        // Working is refused, and so is being looked at; done is closed.
+        served.report(worker, AgentStatus::Running, None);
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            6,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "working",
+            "{refused}"
+        );
+        assert!(said(&refused).contains("running"), "{}", said(&refused));
+        assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_some()));
+        assert!(
+            !served.read(|workspace, _| workspace.closing_question_is_up()),
+            "a refused close put the question up for the person"
+        );
+        served.report(worker, AgentStatus::Idle, None);
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::FocusPane(worker), ctx);
+        });
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            7,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "focused",
+            "{refused}"
+        );
+        served.update(|workspace, ctx| {
+            workspace.apply(TabAction::FocusPane(person), ctx);
+        });
+        let (client, closed) = tool(
+            &mut served,
+            client,
+            8,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(closed["isError"], false, "{closed}");
+        assert_eq!(closed["structuredContent"]["tab_closed"], false);
+        assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_none()));
+        assert_eq!(
+            served.tab_of(second),
+            lead_tab,
+            "the rest of the split stays"
+        );
+        client.finish();
+
+        // And with no token at all, nothing is closed.
+        let socket = served.socket();
+        let refused = served.ask(move |_| {
+            cli::unix::close_pane(
+                &socket,
+                None,
+                protocol::ClosePane {
+                    pane: second.as_u64(),
+                },
+                true,
+            )
+            .expect_err("no token")
+            .to_string()
+        });
+        assert!(refused.contains("unauthorized"), "{refused}");
+    }
+
+    #[test]
+    fn a_closing_pane_with_a_command_open_or_a_question_held_is_working() {
+        let Some(mut served) = marked_bash() else {
+            return;
+        };
+        served.shell.open();
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({ "command": ["sleep", "30"] }),
+        );
+        let worker = served.pane(opened["structuredContent"]["pane_id"].as_u64().unwrap());
+        served.pump_until("the command never started", |served| {
+            served.session(worker, |session| session.running_command.is_some())
+        });
+        let (client, refused) = tool(
+            &mut served,
+            client,
+            2,
+            "crook_pane_close",
+            json!({ "pane": worker.as_u64() }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "working",
+            "{refused}"
+        );
+        assert!(said(&refused).contains("sleep"), "{}", said(&refused));
+        assert!(served.read(|workspace, _| workspace.tabs().pane(worker).is_some()));
+        client.finish();
+    }
+
+    #[test]
+    fn a_wait_the_client_cancels_is_let_go_by_the_window_and_never_answered() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({ "command": ["make"] }),
+        );
+        let number = opened["structuredContent"]["pane_id"].as_u64().unwrap();
+        client.start_call(
+            2,
+            "crook_pane_wait",
+            json!({ "pane": number, "until": "needs-input", "timeout_secs": 600 }),
+            None,
+        );
+        served.pump_until("the wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        client.send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 2, "reason": "the person pressed Esc" }
+        }));
+        let lead_after = lead;
+        let started = Instant::now();
+        // A wait whose client has gone is dropped the next time anything is
+        // told to the window's watches.
+        let mut status = [AgentStatus::Running, AgentStatus::Idle]
+            .into_iter()
+            .cycle();
+        while served.waiting() != 0 {
+            // A change, every time: a report of what it already said is
+            // nothing to tell.
+            served.report(lead_after, status.next().expect("cycles"), None);
+            served.window.queue.run_until_parked();
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the window kept the cancelled wait"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Nothing for the cancelled call; the next answer is the ping's.
+        let (client, pong) = served.ask(move |_| {
+            let pong = client.request(3, "ping", json!({}));
+            (client, pong)
+        });
+        assert_eq!(pong["id"], 3, "{pong}");
+
+        // A client that goes takes its waits with it: the server ends at
+        // once rather than when the ten minutes are up.
+        client.start_call(
+            4,
+            "crook_pane_wait",
+            json!({ "pane": number, "until": "needs-input", "timeout_secs": 600 }),
+            None,
+        );
+        served.pump_until("the second wait was never registered", |served| {
+            served.waiting() == 1
+        });
+        let started = Instant::now();
+        served.ask(move |_| client.finish());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn events_wait_follows_from_its_first_call_and_hands_over_what_gathered_in_between() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let client = mcp(&served, lead);
+        let (client, opened) = tool(
+            &mut served,
+            client,
+            1,
+            "crook_tab_new",
+            json!({ "command": ["make"] }),
+        );
+        let worker = served.pane(opened["structuredContent"]["pane_id"].as_u64().unwrap());
+        let (client, first) = tool(
+            &mut served,
+            client,
+            2,
+            "crook_events_wait",
+            json!({ "timeout_secs": 0 }),
+        );
+        assert_eq!(first["isError"], false, "{first}");
+        assert!(
+            said(&first).contains("Following the events"),
+            "{}",
+            said(&first)
+        );
+        let following = first["structuredContent"]["following"].as_array().unwrap();
+        assert!(following.contains(&json!(worker.as_u64())), "{first}");
+        served.pump_until("the stream was never registered", |served| {
+            served.following() == 1
+        });
+
+        // Between two calls: held for the next.
+        served.report(worker, AgentStatus::NeedsInput, Some("run \u{1b}[2Jrm?"));
+        let (client, next) = tool(
+            &mut served,
+            client,
+            3,
+            "crook_events_wait",
+            json!({ "pane": worker.as_u64(), "timeout_secs": 5 }),
+        );
+        let events = next["structuredContent"]["events"].as_array().unwrap();
+        let status = events
+            .iter()
+            .find(|event| event["event"] == "status")
+            .unwrap_or_else(|| panic!("a status: {next}"));
+        assert_eq!(status["pane_id"], worker.as_u64());
+        assert_eq!(status["status"], "needs-input");
+        assert_eq!(status["message"], "run rm?", "escapes taken out");
+        assert!(next["structuredContent"].get("following").is_none());
+        client.finish();
+        let started = Instant::now();
+        let mut status = [AgentStatus::Running, AgentStatus::Idle]
+            .into_iter()
+            .cycle();
+        while served.following() != 0 {
+            served.report(worker, status.next().expect("cycles"), None);
+            served.window.queue.run_until_parked();
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the stream outlived its client"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn what_a_pane_titled_itself_reaches_the_model_without_its_escapes() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        served.titled(lead, "evil\u{1b}[2J title \u{202e}txt.exe");
+        let client = mcp(&served, lead);
+        let (client, listed) = tool(&mut served, client, 1, "crook_pane_list", json!({}));
+        let text = said(&listed);
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{202e}'),
+            "{text:?}"
+        );
+        let title = listed["structuredContent"]["panes"][0]["title"]
+            .as_str()
+            .unwrap();
+        assert!(!title.contains('\u{1b}'), "{title:?}");
+        assert!(title.contains("\\u{202e}"), "{title:?}");
+        client.finish();
+    }
 }

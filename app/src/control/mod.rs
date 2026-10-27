@@ -13,7 +13,8 @@
 //! the tabs it opened; `pane.split` and `pane.close`, which split a pane
 //! off the asker's or close one it opened; and `agent.ask`, which an
 //! agent's permission hook hands its question to and waits on, and which no
-//! verb answers — see [`ask`]. "The window answers" in `docs/architecture.md` is the whole
+//! verb answers — see [`ask`]. [`mcp`] serves the same verbs to an agent's
+//! MCP client. "The window answers" in `docs/architecture.md` is the whole
 //! argument: the threat model, the protocol, and what the verbs after these
 //! will need; "Answering an agent" is the question's.
 //!
@@ -46,6 +47,8 @@
 //!   commands and what they printed, capped.
 //! * [`close`] is the window's side of `pane.close`: which panes a caller
 //!   may close, and that none of them is working.
+//! * [`mcp`] is `crook mcp`, a stdio MCP server whose tools are these verbs,
+//!   asked as the pane it runs in through [`cli`]'s connection.
 //! * [`ask`] is the window's side of `agent.ask`: the questions agents'
 //!   hooks are waiting on, which pane each is in, and how each ended.
 //! * This file is the window's side of the rest: the [`Inbox`] a connection
@@ -79,6 +82,7 @@ pub mod ask;
 pub mod blocks;
 pub mod cli;
 pub mod close;
+pub mod mcp;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;

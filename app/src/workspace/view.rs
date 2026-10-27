@@ -3111,6 +3111,13 @@ impl Workspace {
             || self.ask_list.is_some()
     }
 
+    /// Whether the question a close asks before it ends working agents is
+    /// up, for a test outside the workspace that must not have put it up.
+    #[cfg(test)]
+    pub(crate) fn closing_question_is_up(&self) -> bool {
+        self.closing.is_some()
+    }
+
     /// The question a close is waiting on, if one is.
     pub(super) fn closing_question(&self) -> Option<&Question> {
         self.closing.as_ref()

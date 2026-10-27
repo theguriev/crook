@@ -183,3 +183,137 @@ fn a_permission_hook_on_windows_prints_nothing_and_exits_0() {
         (Some(0), String::new(), String::new())
     );
 }
+
+/// `crook mcp` as an MCP client starts it: outside any Crook pane, with a
+/// handshake, a listing and a call on standard input, then the end of it.
+/// Standard output carries the three answers, each one line of JSON-RPC,
+/// and nothing else — no log line, no banner — and the process ends when
+/// its input does. The call says where it is not rather than failing the
+/// server, so a plugin installed everywhere costs a session outside Crook
+/// nothing but the tools.
+#[test]
+fn crook_mcp_answers_on_stdout_with_json_rpc_alone_and_ends_with_its_input() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = crook::process::command(env!("CARGO_BIN_EXE_crook"))
+        .arg("mcp")
+        .env_remove("TERM_PROGRAM")
+        .env_remove("CROOK_PANE_ID")
+        .env_remove("CROOK_SOCKET")
+        .env_remove("CROOK_TOKEN")
+        .env("RUST_LOG", "debug")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the crook binary runs");
+    let mut input = child.stdin.take().expect("its input");
+    for line in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"crook_pane_list","arguments":{}}}"#,
+    ] {
+        writeln!(input, "{line}").expect("it reads");
+    }
+    drop(input);
+    let output = child.wait_with_output().expect("it ends with its input");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("text");
+    let messages: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("not JSON on stdout ({error}): {line:?}"))
+        })
+        .collect();
+    let ids: Vec<_> = messages
+        .iter()
+        .map(|message| message["id"].clone())
+        .collect();
+    assert_eq!(ids.len(), 3, "{stdout}");
+    for id in 1..=3 {
+        assert!(ids.contains(&serde_json::json!(id)), "{stdout}");
+    }
+    for message in &messages {
+        assert_eq!(message["jsonrpc"], "2.0", "{message}");
+    }
+    let call = messages
+        .iter()
+        .find(|message| message["id"] == 3)
+        .expect("the call's answer");
+    assert_eq!(call["result"]["isError"], true, "{call}");
+    let said = call["result"]["content"][0]["text"].as_str().expect("text");
+    if cfg!(unix) {
+        assert!(said.contains("not running inside a Crook pane"), "{said}");
+    } else {
+        assert!(said.contains("not available on this platform"), "{said}");
+    }
+}
+
+/// The MCP server Claude Code's plugin declares, started the way Claude Code
+/// starts it — its `command` and `args`, the agent's environment — with
+/// `CROOK_BIN` naming the binary, and then with no binary anywhere: the
+/// first answers `initialize`, and the second ends at once with a line on
+/// stderr and nothing on stdout, which Claude Code shows as a server that
+/// failed to start and nothing worse.
+#[test]
+#[cfg(unix)]
+fn the_plugins_mcp_server_starts_crook_mcp_and_says_so_when_there_is_no_crook() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let declared: serde_json::Value =
+        serde_json::from_str(include_str!("../../packaging/claude-code/.mcp.json"))
+            .expect("the plugin's .mcp.json is JSON");
+    let server = &declared["mcpServers"]["crook"];
+    assert_eq!(server["type"], "stdio");
+    let program = server["command"].as_str().expect("a command");
+    let args: Vec<&str> = server["args"]
+        .as_array()
+        .expect("args")
+        .iter()
+        .map(|arg| arg.as_str().expect("a word"))
+        .collect();
+    // Nothing Claude Code would expand itself: the shell reads the variables.
+    assert!(!args.iter().any(|arg| arg.contains("${")), "{args:?}");
+
+    let run = |bin: Option<&str>, path: &str| {
+        // Found on the agent's own PATH, which the second run takes away.
+        let program = if program == "sh" { "/bin/sh" } else { program };
+        let mut command = crook::process::command(program);
+        command
+            .args(&args)
+            .env_remove("CROOK_BIN")
+            .env_remove("TERM_PROGRAM")
+            .env_remove("CROOK_PANE_ID")
+            .env("PATH", path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(bin) = bin {
+            command.env("CROOK_BIN", bin);
+        }
+        let mut child = command.spawn().expect("sh runs");
+        let mut input = child.stdin.take().expect("its input");
+        let _ = writeln!(
+            input,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#
+        );
+        drop(input);
+        child.wait_with_output().expect("it ends")
+    };
+
+    let found = run(Some(env!("CARGO_BIN_EXE_crook")), "/usr/bin:/bin");
+    assert!(found.status.success(), "{found:?}");
+    let answer: serde_json::Value =
+        serde_json::from_slice(&found.stdout).expect("one JSON-RPC answer");
+    assert_eq!(answer["result"]["serverInfo"]["name"], "crook", "{answer}");
+
+    let missing = run(None, "/nonexistent");
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("no crook binary"), "{stderr}");
+}

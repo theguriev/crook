@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "crook": {
+      "type": "stdio",
+      "command": "sh",
+      "args": [
+        "-c",
+        "crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || { echo 'crook mcp: no crook binary: CROOK_BIN names none and crook is not on PATH' >&2; exit 1; }; exec \"$crook\" mcp"
+      ]
+    }
+  }
+}

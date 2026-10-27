@@ -1241,6 +1241,42 @@ pub mod unix {
         answer(&mut BufReader::new(&stream))
     }
 
+    /// One verb asked of the window at `socket`, sent and not yet answered:
+    /// what `crook mcp` holds while a wait waits, so that a client that
+    /// cancels it can hang the connection up, and the window let it go,
+    /// rather than leaving it to run out its time.
+    pub struct Asked {
+        stream: UnixStream,
+    }
+
+    impl Asked {
+        /// Connects to the window at `socket`, after every check
+        /// [`connect_checked`] makes, and sends `verb`.
+        pub fn send(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Self> {
+            let stream = connect_checked(socket)?;
+            request(&stream, verb, token)?;
+            Ok(Self { stream })
+        }
+
+        /// A handle that hangs the connection up from another thread.
+        pub fn hang_up_handle(&self) -> Result<UnixStream> {
+            self.stream
+                .try_clone()
+                .context("could not hold the connection")
+        }
+
+        /// The window's reply: its answer, or its refusal with the code a
+        /// caller can branch on — or an error when there was no reply.
+        pub fn reply(self) -> Result<Result<Value, Refusal>> {
+            read_reply(&mut BufReader::new(&self.stream))
+        }
+
+        /// The connection, for a stream's further lines.
+        pub fn into_stream(self) -> UnixStream {
+            self.stream
+        }
+    }
+
     /// Reads one reply: the answer or the refusal, as the window said it.
     pub fn read_reply(replies: &mut impl BufRead) -> Result<Result<Value, Refusal>> {
         let mut line = Vec::new();
@@ -1258,5 +1294,21 @@ pub mod unix {
             (_, Some(refusal)) => Ok(Err(refusal)),
             _ => bail!("the window's reply carries neither an answer nor a refusal"),
         }
+    }
+
+    /// Reads the next line of a stream `events.follow` answered on, as
+    /// JSON; `None` once the window has ended it.
+    pub fn next_event(replies: &mut impl BufRead) -> Result<Option<Value>> {
+        let mut line = Vec::new();
+        replies
+            .take(MAX_REPLY)
+            .read_until(b'\n', &mut line)
+            .context("the window's stream broke off")?;
+        if line.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_slice(&line)
+            .map(Some)
+            .context("what came down the stream is not an event")
     }
 }
