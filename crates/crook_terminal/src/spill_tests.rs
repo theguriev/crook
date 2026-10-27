@@ -1499,3 +1499,45 @@ fn a_flood_a_whole_slice_of_which_scrolls_about_twice_what_is_kept_is_fed_short(
         emulator.overgrown_slices
     );
 }
+
+#[test]
+fn a_column_change_on_a_blank_screen_keeps_the_row_the_cursor_is_on() {
+    // A picture printed over blank cells leaves the cursor beside it, and
+    // so does a cursor move on a cleared screen: the screen holds nothing
+    // and the program's next line goes on the cursor's row. A column change
+    // started the open block on the row below, and the spill then dropped
+    // the cursor's row as nobody's.
+    for (what, opening) in [
+        ("a picture", picture()),
+        ("a cursor move", "\x1b[2;3H".to_owned()),
+    ] {
+        let mut twins = Twins::new(1000);
+        twins.feed(&opening);
+        twins.resize(15, 5);
+        twins.feed("first\r\n");
+        twins.feed(output(0, 60));
+        let (rows, _) = twins.spilling.harvest_rows(0, 1);
+        assert!(
+            rows.to_text().contains("first"),
+            "{what}: the scrollback starts {:?}",
+            rows.to_text()
+        );
+    }
+}
+
+#[test]
+fn a_burst_of_screenful_scrolls_keeps_the_scrollback_alike_however_it_is_read() {
+    // `CSI n S` over a short scrollback, fed in reads of every size a pty
+    // hands out: the spilling twin keeps as many lines as the whole one, and
+    // the same ones.
+    for read in [1, 7, 9, 31, 64, 128, 1000, 4096, 16 * 1024] {
+        let mut twins = Twins::new(60);
+        twins.feed(output(0, 40));
+        let burst = format!("\x1b[{ROWS}S").repeat(120);
+        for piece in burst.as_bytes().chunks(read) {
+            twins.feed(piece);
+        }
+        twins.feed(output(40, 45));
+        twins.alike(&format!("after the burst in {read}-byte reads"));
+    }
+}

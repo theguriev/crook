@@ -2608,7 +2608,7 @@ fn start(
 
     let snapshot = terminal.snapshot();
     let shared = Arc::new(Shared {
-        terminal: Mutex::new(terminal),
+        terminal: parking_lot::Mutex::new(terminal),
         latest: Mutex::new(Latest::new(snapshot)),
         blocks: Mutex::new(Arc::default()),
         unpublished: Mutex::new(Vec::new()),
@@ -2654,7 +2654,13 @@ fn whole_lines(carried: f32, delta: f32) -> (i32, f32) {
 
 /// Everything a reader thread and the main thread share for one terminal.
 struct Shared {
-    terminal: Mutex<Terminal>,
+    /// A fair lock, as far as handing it over goes: the reader lets it go
+    /// between slices of a flood with `unlock_fair`, which gives it to a
+    /// thread waiting for it — the window drawing a frame, a keystroke —
+    /// rather than back to the reader, which locks it again at once. A
+    /// `std` mutex is barged: the reader won nearly every time, and the
+    /// window waited out the whole flood, seconds of it.
+    terminal: parking_lot::Mutex<Terminal>,
 
     /// The most recent snapshot built, so painting never waits on parsing —
     /// and, for a pane off screen, what the last publication left in place of
@@ -2976,8 +2982,8 @@ impl Wake {
 }
 
 impl Shared {
-    fn lock(&self) -> MutexGuard<'_, Terminal> {
-        self.terminal.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Terminal> {
+        self.terminal.lock()
     }
 
     fn publish_state(&self) -> MutexGuard<'_, PublishState> {
@@ -3106,16 +3112,28 @@ impl Shared {
     /// nothing else; the snapshot it will eventually be drawn from is built
     /// under a second, later acquisition, so a burst never holds the terminal
     /// for longer than one chunk takes to parse.
+    ///
+    /// Nor for longer than one slice of it: a chunk of escapes that each
+    /// write the whole screen is parsed a slice of work at a time, and the
+    /// lock is let go between them, so that a keystroke or a frame waits for
+    /// a slice rather than for the chunk. See `Emulator::advance_some`.
     fn feed(&self, bytes: &[u8]) {
-        let mut terminal = self.lock();
-        if let Err(error) = terminal.feed(bytes) {
-            log::debug!("could not answer a shell's query: {error}");
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let mut terminal = self.lock();
+            let (consumed, replied) = terminal.feed_some(rest);
+            if let Err(error) = replied {
+                log::debug!("could not answer a shell's query: {error}");
+            }
+            // Set aside, not handed over: the picture of these bytes is not
+            // published yet. Under the parse's own acquisition, so a publish
+            // that finds them here took its snapshot after they were parsed.
+            Self::collect(&self.unpublished, terminal.take_events());
+            // Fairly: to whoever has been waiting for it while this slice
+            // was parsed, before this thread can take it for the next one.
+            parking_lot::MutexGuard::unlock_fair(terminal);
+            rest = &rest[consumed..];
         }
-        // Set aside, not handed over: the picture of these bytes is not
-        // published yet. Under the parse's own acquisition, so a publish that
-        // finds them here took its snapshot after they were parsed.
-        Self::collect(&self.unpublished, terminal.take_events());
-        drop(terminal);
 
         self.publish_state().pending = true;
     }

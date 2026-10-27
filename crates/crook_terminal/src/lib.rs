@@ -287,6 +287,17 @@ impl Terminal {
         self.send_replies()
     }
 
+    /// Consumes output as [`Self::feed`] does, as far as one slice of work
+    /// goes — see [`Emulator::advance_some`] — and says how many bytes that
+    /// took, with how writing back what the slice asked for went.
+    ///
+    /// For a caller that parses under a lock and lets it go between slices,
+    /// feeding the rest after it.
+    pub fn feed_some(&mut self, bytes: &[u8]) -> (usize, io::Result<()>) {
+        let consumed = self.emulator.advance_some(bytes);
+        (consumed, self.send_replies())
+    }
+
     /// Writes, or queues, what the emulator owes the child.
     fn send_replies(&mut self) -> io::Result<()> {
         let replies = self.emulator.take_replies();

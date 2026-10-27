@@ -61,6 +61,20 @@
 //! makes no path a link at all, and nothing is looked for on this disk on its
 //! behalf. A URL there is still one.
 //!
+//! # A `file://` URL is a path
+//!
+//! The platform's handler opens a `file://` URL the way a double-click opens
+//! the file, and for a program that is starting it: `explorer` runs
+//! `setup.exe`, `open` launches `Tool.app` and runs `run.command`, `xdg-open`
+//! hands a `.desktop` file or Wine's `.exe` to what runs it. A path printed
+//! bare is looked for and refused when it is one of those — see [`Opens::of`]
+//! — and the same path printed with `file://` in front of it is no different
+//! a thing to click. So a `file://` URL naming this machine is read as the
+//! path it decodes to and goes the same way, looked for first and underlined
+//! only once found. One naming another machine is no link, like a path
+//! printed there: this machine has no file at that path to open, and
+//! `explorer` would fetch the program from the host it names.
+//!
 //! [`CellFlags::WRAPLINE`]: crook_terminal::CellFlags::WRAPLINE
 
 use std::cell::RefCell;
@@ -91,9 +105,10 @@ pub struct LinkSpan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkTarget {
     /// An address with a scheme `crook_terminal::url` recognises, handed to
-    /// the platform's handler as it was printed.
+    /// the platform's handler as it was printed. Never a `file:` one, which
+    /// is a [`Self::File`]: see the module docs.
     Url(String),
-    /// A file a program printed the path of.
+    /// A file a program printed the path of, or a `file://` URL to.
     File(FileLink),
 }
 
@@ -634,6 +649,93 @@ pub fn file_url(path: &Path) -> String {
     url
 }
 
+/// What a URL is as a file: see the module docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FileUrl {
+    /// Not a `file:` URL.
+    Not,
+    /// A file on this machine, at this path.
+    Here(PathBuf),
+    /// A `file:` URL that names no file this machine can open: one on
+    /// another host, or one that does not decode to a path.
+    Elsewhere,
+}
+
+impl FileUrl {
+    /// Reads `uri` as a file, the inverse of [`file_url`].
+    ///
+    /// This machine is no host at all — `file:///etc/hosts` — `localhost`,
+    /// or on Unix a name this machine answers to, which is what an OSC 7
+    /// URL names. On Windows a host is a share on it, `\\host\share`,
+    /// so only the first two are. A query or a fragment is not part of the
+    /// path. Every `%XX` is the byte it stands for; one that is not two hex
+    /// digits, or one that decodes to a NUL, is no path.
+    fn of(uri: &str) -> Self {
+        const SCHEME: &str = "file://";
+        if !uri
+            .get(..SCHEME.len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+        {
+            return Self::Not;
+        }
+        let rest = &uri[SCHEME.len()..];
+        let Some(slash) = rest.find('/') else {
+            return Self::Elsewhere;
+        };
+        let (host, path) = rest.split_at(slash);
+        let here = host.is_empty()
+            || host.eq_ignore_ascii_case("localhost")
+            || (cfg!(unix) && crate::tab::on_this_machine(Some(host)));
+        if !here {
+            return Self::Elsewhere;
+        }
+        let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+        decoded_path(path).map_or(Self::Elsewhere, Self::Here)
+    }
+}
+
+/// A `file:` URL's path, decoded into the path it names, or `None` when it
+/// names none.
+fn decoded_path(path: &str) -> Option<PathBuf> {
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut rest = path.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        if byte == b'%' {
+            let digits = after.get(..2)?;
+            let digits = std::str::from_utf8(digits).ok()?;
+            if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+                return None;
+            }
+            bytes.push(u8::from_str_radix(digits, 16).ok()?);
+            rest = &after[2..];
+        } else {
+            bytes.push(byte);
+            rest = after;
+        }
+    }
+    if bytes.contains(&0) {
+        return None;
+    }
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStringExt as _;
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    };
+    // `file:///C:/x` is `C:/x`, and nothing else is a file here: a path with
+    // no drive is one on whichever drive is current, and `//host/share` is
+    // another machine's.
+    #[cfg(not(unix))]
+    let path = {
+        let text = String::from_utf8(bytes).ok()?;
+        let text = text.strip_prefix('/').unwrap_or(&text);
+        if text.starts_with(['/', '\\']) {
+            return None;
+        }
+        PathBuf::from(text)
+    };
+    path.is_absolute().then_some(path)
+}
+
 /// The link under a cell of a block's rows, or `None` when the cell is not
 /// part of one.
 ///
@@ -652,7 +754,8 @@ pub fn file_url(path: &Path) -> String {
 ///
 /// A URL is looked for first, and a path where there is none — when `paths`
 /// says it is on this machine, read against the directory the command that
-/// printed it ran in. A relative path with no directory to read it against is
+/// printed it ran in. A `file://` URL is the path it names, and no link at
+/// all where that is not a file on this machine. A relative path with no directory to read it against is
 /// not a link: a shell that never said where it is cannot say where its
 /// output's paths are either.
 pub fn find(
@@ -702,11 +805,21 @@ pub fn find(
 
     let at = (row - first) * columns + column;
     let (start, end, target) = match url::at(&text, at) {
-        Some(url) => (
-            url.start,
-            url.end(),
-            LinkTarget::Url(url.uri.replace(SPACER, "")),
-        ),
+        Some(url) => {
+            let uri = url.uri.replace(SPACER, "");
+            let target = match FileUrl::of(&uri) {
+                FileUrl::Not => LinkTarget::Url(uri),
+                FileUrl::Here(path) if matches!(paths, PathsOn::ThisMachine(_)) => {
+                    LinkTarget::File(FileLink {
+                        path,
+                        line: None,
+                        column: None,
+                    })
+                }
+                FileUrl::Here(_) | FileUrl::Elsewhere => return None,
+            };
+            (url.start, url.end(), target)
+        }
         None => {
             let PathsOn::ThisMachine(directory) = paths else {
                 return None;
@@ -1294,6 +1407,107 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The link under a cell of the grid, read for `paths`.
+    fn link_on(snapshot: &Snapshot, column: usize, paths: &PathsOn) -> Option<LinkSpan> {
+        find(&rows(snapshot), 0, column, paths, LinkRow::Viewport)
+    }
+
+    /// The file a link opens, as a file link with no line.
+    fn file_at(path: impl Into<PathBuf>) -> LinkTarget {
+        LinkTarget::File(FileLink {
+            path: path.into(),
+            line: None,
+            column: None,
+        })
+    }
+
+    #[test]
+    fn a_file_url_on_this_machine_is_the_path_it_decodes_to() {
+        // So it is looked for and opened the way the bare path is, not handed
+        // to the platform's handler as an address.
+        // A drive on Windows, where a path without one is no file.
+        let drive = if cfg!(windows) { "/C:" } else { "" };
+        let here = PathsOn::ThisMachine(None);
+        for (printed, path) in [
+            ("file://", "/tmp/s.exe"),
+            ("FILE://", "/tmp/s.exe"),
+            ("file://localhost", "/tmp/s.exe"),
+            ("file://LOCALHOST", "/tmp/s.exe"),
+            ("file://", "/a%20b/%73.exe"),
+            ("file://", "/tmp/s.exe?x=1"),
+            ("file://", "/tmp/s.exe#top"),
+        ] {
+            let printed = format!("{printed}{drive}{path}");
+            let snapshot = grid(&printed);
+            let link =
+                link_on(&snapshot, 3, &here).unwrap_or_else(|| panic!("{printed} is no link"));
+            let decoded = if path.starts_with("/a%20b") {
+                "/a b/s.exe"
+            } else {
+                "/tmp/s.exe"
+            };
+            assert_eq!(
+                link.target,
+                file_at(format!("{}{decoded}", drive.trim_start_matches('/'))),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_url_naming_no_file_here_is_no_link() {
+        let here = PathsOn::ThisMachine(None);
+        for printed in [
+            // Another machine's, which this one has no file of — and which
+            // `explorer` would fetch a program from.
+            "file://elsewhere.invalid/s.exe",
+            // An escape that is not one, and one that is a NUL.
+            "file:///tmp/s%zz.exe",
+            "file:///tmp/s%00.exe",
+            // No path at all.
+            "file://localhost",
+        ] {
+            let snapshot = grid(printed);
+            assert_eq!(link_on(&snapshot, 3, &here), None, "{printed}");
+        }
+        // And from the far side of an ssh, where every path is that
+        // machine's. A web address there is still a link.
+        let snapshot = grid("file:///tmp/s.exe");
+        assert_eq!(link_on(&snapshot, 3, &PathsOn::AnotherMachine), None);
+        let snapshot = grid("https://example.com");
+        assert_eq!(
+            link_on(&snapshot, 3, &PathsOn::AnotherMachine).map(|link| link.target),
+            Some(url("https://example.com"))
+        );
+    }
+
+    #[test]
+    fn a_file_url_to_a_program_is_refused_as_the_bare_path_is() {
+        // A repository ships `setup.exe`, and its README or an agent prints
+        // the file URL to it. Before, the URL went to the platform's handler,
+        // which runs it; the same path printed bare was refused.
+        let scratch = Scratch::new("file-url-program");
+        let setup = scratch.0.join("set up.exe");
+        std::fs::write(&setup, "MZ").expect("writable");
+        let printed = file_url(&setup);
+        // Wide enough for the whole URL on one screen, however long the
+        // temporary directory's name is.
+        let columns = u16::try_from(printed.len() + 1).expect("a URL shorter than a screen");
+        let mut emulator = Emulator::new(TerminalSize::new(columns, 2), 10, Palette::default());
+        emulator.advance(printed.as_bytes());
+        let snapshot = emulator.snapshot();
+        let link = link_on(&snapshot, 3, &PathsOn::ThisMachine(None)).expect("a link");
+        let LinkTarget::File(file) = link.target else {
+            panic!(
+                "{printed} went to the platform's handler as {:?}",
+                link.target
+            );
+        };
+        assert_eq!(file.path, setup);
+        assert_eq!(Found::at(&file.path), Found::Program);
+        assert_eq!(Opens::of(Found::at(&file.path), false), None);
     }
 
     #[test]

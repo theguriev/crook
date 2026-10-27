@@ -44029,6 +44029,56 @@ mod path_links {
         );
         assert_eq!(crate::browser::opened(), Vec::<String>::new());
     }
+
+    #[test]
+    fn a_printed_file_url_to_a_program_is_refused_as_its_bare_path_is() {
+        // `explorer` runs a `setup.exe` handed to it as a `file://` URL, and
+        // `xdg-open` hands one to Wine. A chord-click on the URL a README or
+        // an agent printed went straight to the platform's handler, past the
+        // look that refuses the same path printed bare.
+        record_starts();
+        crate::browser::record_opens();
+        let scratch = Scratch::new();
+        let setup = written(&scratch, "setup.exe");
+        let notes = written(&scratch, "notes.md");
+        let mut emulator = crook_terminal::Emulator::new(
+            crook_terminal::TerminalSize::new(200, 4),
+            10,
+            crook_terminal::Palette::default(),
+        );
+        emulator.advance(file_url(&setup).as_bytes());
+        let snapshot = emulator.snapshot();
+        let rows = crook_terminal::Rows::Live {
+            snapshot: &snapshot,
+            top: 0,
+            count: snapshot.rows,
+        };
+        let link = crate::pane_link::find(
+            &rows,
+            0,
+            3,
+            &crate::pane_link::PathsOn::ThisMachine(None),
+            LinkRow::Viewport,
+        )
+        .expect("the URL is found");
+        let LinkTarget::File(found) = link.target else {
+            panic!("the URL went to the platform's handler: {:?}", link.target);
+        };
+        assert_eq!(found.path, setup);
+
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.workspace_update(|workspace, _| workspace.open_paths_with(|| None));
+        let links = links_of(&harness, pane);
+        hover(&mut harness, pane, &found.path, None);
+        hover(&mut harness, pane, &notes, None);
+        harness.wait_for("the file never underlined", |_| links.is_some());
+        hover(&mut harness, pane, &found.path, None);
+        assert_eq!(links.get(), None, "a program underlined with no editor");
+        assert!(!press(&mut harness, pane, &found.path, None));
+        assert_eq!(crate::browser::opened(), Vec::<String>::new());
+        assert_eq!(started(), []);
+    }
 }
 
 /// Claude Code's title glyph, read as a status for a pane with no hooks.

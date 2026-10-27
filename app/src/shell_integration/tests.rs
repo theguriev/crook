@@ -1595,6 +1595,9 @@ struct RealShell<'a> {
     binary: Option<&'a str>,
     /// The line typed at the first prompt.
     command: &'a str,
+    /// The lines typed at the prompts after it, one a prompt, each once the
+    /// line before it has finished.
+    then: &'a [&'a str],
 }
 
 impl Default for RealShell<'_> {
@@ -1609,6 +1612,7 @@ impl Default for RealShell<'_> {
             inherited_path: None,
             binary: None,
             command: "printf 'crook-ok\\n'",
+            then: &[],
         }
     }
 }
@@ -1621,6 +1625,9 @@ struct Ran {
     /// startup files the shell was measured against, and a test that wants to
     /// run the same shell again by hand needs them still there.
     home: TempDir,
+    /// The pane the shell ran in, with everything it wrote fed to it: what
+    /// Crook made of the bytes, its blocks and the directory it was told.
+    terminal: Terminal,
 }
 
 impl RealShell<'_> {
@@ -1696,8 +1703,18 @@ impl RealShell<'_> {
                 .expect("a fresh terminal has its reader"),
         );
 
+        let lines: Vec<&str> = std::iter::once(self.command)
+            .chain(self.then.iter().copied())
+            .collect();
         let mut seen = String::new();
-        let mut submitted = false;
+        // How many lines have been typed, and where in `seen` the shell's
+        // answer to the last one is looked for: a prompt end after it is the
+        // next prompt, and a success after it is the line finishing. A
+        // success, because a line can hold several commands and fail in all
+        // but the last.
+        let mut typed = 0;
+        let mut after = 0;
+        let mut finished = false;
         let deadline = Instant::now() + DEADLINE;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1713,19 +1730,38 @@ impl RealShell<'_> {
             terminal.feed(&chunk).expect("feeding should not fail");
             seen.push_str(&String::from_utf8_lossy(&chunk));
 
-            if !submitted && seen.contains("\x1b]133;B") {
-                submitted = true;
-                terminal
-                    .write(format!("{}\r", self.command).as_bytes())
-                    .expect("writing to the shell should not fail");
+            // The line finishing first, then the next prompt, because one
+            // read can hold both.
+            if typed > 0
+                && !finished
+                && let Some(at) = seen[after..].find("\x1b]133;D;0")
+            {
+                finished = true;
+                after += at + 1;
+                if typed == lines.len() {
+                    break;
+                }
             }
-            if seen.contains("\x1b]133;D;0") {
-                break;
+            // Every line but the first after its predecessor has finished,
+            // and each at a prompt whose end has been drawn.
+            if (typed == 0 || finished)
+                && let Some(at) = seen[after..].find("\x1b]133;B")
+            {
+                terminal
+                    .write(format!("{}\r", lines[typed]).as_bytes())
+                    .expect("writing to the shell should not fail");
+                typed += 1;
+                after += at + 1;
+                finished = false;
             }
         }
 
         let _ = terminal.write(b"exit\r");
-        Some(Ran { seen, home })
+        Some(Ran {
+            seen,
+            home,
+            terminal,
+        })
     }
 }
 
@@ -3341,4 +3377,226 @@ fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
 
     assert_eq!(seen.matches("\x1b]133;D;3").count(), 2, "{seen:?}");
     assert!(seen.contains("\x1b]133;D;5"), "{seen:?}");
+}
+
+/// Runs `first` and then `second` in a real shell, and returns the rows of
+/// the block `second` ran in, a line a row, or `None` when that shell is not
+/// installed here.
+fn rows_of_the_second_block(name: &str, first: &str, second: &str) -> Option<Vec<String>> {
+    // With fish's own marks off where it has them, so that the snippet's are
+    // what is measured, as for every other shell; `fish-native` is fish with
+    // them on, where it has them.
+    let (name, extra): (&str, &[(&str, &str)]) = match name {
+        "fish" => ("fish", &[("fish_features", "no-mark-prompt")]),
+        "fish-native" if fish_marks_its_own_prompt() == Some(true) => ("fish", &[]),
+        "fish-native" => return None,
+        name => (name, &[]),
+    };
+    let ran = RealShell {
+        name,
+        extra,
+        // A prompt of one row: macOS's bash names the machine in its own,
+        // and a runner's name is long enough to wrap it.
+        home_files: PROMPTS_WITHOUT_THE_DIRECTORY,
+        command: first,
+        then: &[second],
+        ..RealShell::default()
+    }
+    .run()?;
+    let blocks = ran.terminal.blocks();
+    let Some(block) = blocks
+        .iter()
+        .find(|block| block.command.as_deref() == Some(second))
+    else {
+        panic!(
+            "{name} filed no block for {second:?}; it filed {:?}, out of {:?}",
+            blocks
+                .iter()
+                .map(|block| (&block.command, block.rows.to_text()))
+                .collect::<Vec<_>>(),
+            ran.seen
+        );
+    };
+    Some(block.rows.to_text().lines().map(str::to_owned).collect())
+}
+
+#[test]
+fn test_a_command_after_output_with_no_newline_keeps_its_prompt_and_command_line() {
+    // `curl -s`, `printf`, `echo -n`: output that does not end in a newline
+    // leaves the cursor in the middle of its last row. bash then draws the
+    // next prompt right there, on the same row, and a block opened on the row
+    // below lost its prompt and its command line. zsh and fish move to a row
+    // of their own first, zsh after drawing its reverse `%` on the old one,
+    // and that mark is not the next block's.
+    for name in ["bash", "zsh", "fish", "fish-native"] {
+        let Some(rows) =
+            rows_of_the_second_block(name, "printf crook-hello", "printf 'crook-next\\n'")
+        else {
+            continue;
+        };
+        let first = rows.first().map(String::as_str).unwrap_or_default();
+        assert!(
+            first.trim_end().ends_with("printf 'crook-next\\n'"),
+            "{name}: the block starts with its prompt and command line, not \
+             {first:?}; its rows were {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "crook-next"),
+            "{name}: and has its output; its rows were {rows:?}"
+        );
+    }
+}
+
+/// Startup files that keep the directory out of each shell's prompt and
+/// title, so that what reaches the pane about it is the snippet's OSC 7 and
+/// nothing else. Not the system's either: Arch's /etc/bash.bashrc puts the
+/// directory in the title from `PROMPT_COMMAND`, unescaped.
+const PROMPTS_WITHOUT_THE_DIRECTORY: &[(&str, &str)] = &[
+    (".bash_profile", "PS1='$ '\nunset PROMPT_COMMAND\n"),
+    (".bashrc", "PS1='$ '\nunset PROMPT_COMMAND\n"),
+    (".zshrc", "PROMPT='%% '\n"),
+    (
+        "config/fish/config.fish",
+        "function fish_prompt; printf '> '; end\nfunction fish_title; end\n",
+    ),
+];
+
+#[test]
+fn test_a_real_shell_reports_a_directory_with_any_name_whole_or_not_at_all() {
+    // A directory name can hold any byte but `/`. The snippets used to escape
+    // only `%` and `;`, so a BEL in a name ended the OSC 7 there — the pane
+    // took the directory beside it for the shell's — and what followed it
+    // arrived as output at every prompt: the scrollback erased, the terminal
+    // reset, mouse reporting turned on. Every byte outside the URL-safe set
+    // now leaves as its `%XX` code: a name with nothing worse than spaces,
+    // punctuation and accents comes back as itself, and one with a control
+    // character in it is refused whole, the directory before it kept.
+    let hostile = "crook-dir-x\x07\x1b[3J\x1bc\x1b[?1003h\x1b[?1006h";
+    let plain = "crook-dir-a b;c%d #?&=+é";
+    for name in ["bash", "zsh", "fish", "fish-native"] {
+        if name == "fish-native" && fish_marks_its_own_prompt() != Some(true) {
+            continue;
+        }
+        for (directory, reported) in [(plain, true), (hostile, false)] {
+            let mut home_files = PROMPTS_WITHOUT_THE_DIRECTORY.to_vec();
+            let keep = format!("{directory}/.keep");
+            home_files.push((&keep, ""));
+            let (name, extra): (&str, &[(&str, &str)]) = match name {
+                "fish" => ("fish", &[("fish_features", "no-mark-prompt")]),
+                "fish-native" => ("fish", &[]),
+                name => (name, &[]),
+            };
+            let Some(ran) = (RealShell {
+                name,
+                extra,
+                home_files: &home_files,
+                command: "cd ~/crook-dir-*",
+                then: &["true"],
+                ..RealShell::default()
+            })
+            .run() else {
+                break;
+            };
+            let home = ran.home.path();
+            let reported_as = ran.terminal.working_directory();
+            if reported {
+                assert_eq!(
+                    Some(home.join(directory).as_path()),
+                    reported_as,
+                    "{name} in {directory:?}; it wrote {:?}",
+                    ran.seen
+                );
+            } else {
+                // The directory it reported before, which is the home: as the
+                // shell spelled it, which on macOS can be through /private.
+                assert_eq!(
+                    reported_as.and_then(Path::file_name),
+                    home.file_name(),
+                    "{name} in {directory:?}; it wrote {:?}",
+                    ran.seen
+                );
+            }
+            let modes = ran.terminal.emulator().mouse_modes();
+            assert!(
+                !modes.motion && !modes.sgr,
+                "{name} in {directory:?} turned mouse reporting on: {:?}",
+                ran.seen
+            );
+            assert!(
+                !ran.seen.contains("\x1b[?1003h"),
+                "{name} in {directory:?} printed the name's escapes: {:?}",
+                ran.seen
+            );
+        }
+    }
+}
+
+#[test]
+fn test_reporting_a_directory_leaves_the_shells_locale_as_it_was() {
+    // bash spells a path out in the C locale, with a `local LC_ALL`, and
+    // zsh with `nomultibyte`, which `emulate -L` keeps to the function:
+    // neither may reach the command line the person types next. And a
+    // startup file that made `LC_ALL` read-only gets no error at every
+    // prompt, and zsh still says where it is.
+    let directory = "crook-dir-\u{e9} x";
+    let keep = format!("{directory}/.keep");
+    for (name, setting, print) in [
+        (
+            "bash",
+            "export LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s]\\n' \"${LC_ALL-unset}\"",
+        ),
+        (
+            "bash",
+            "readonly LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s]\\n' \"${LC_ALL-unset}\"",
+        ),
+        (
+            "zsh",
+            "export LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s %s]\\n' \"${LC_ALL-unset}\" \"$options[multibyte]\"",
+        ),
+        (
+            "zsh",
+            "readonly LC_ALL=POSIX\n",
+            "printf 'CROOK_LC[%s %s]\\n' \"${LC_ALL-unset}\" \"$options[multibyte]\"",
+        ),
+    ] {
+        let mut home_files = PROMPTS_WITHOUT_THE_DIRECTORY.to_vec();
+        let profile = format!("PS1='$ '\nunset PROMPT_COMMAND\n{setting}");
+        let zshrc = format!("PROMPT='%% '\n{setting}");
+        home_files.retain(|(file, _)| ![".bash_profile", ".bashrc", ".zshrc"].contains(file));
+        home_files.push((".bash_profile", &profile));
+        home_files.push((".bashrc", &profile));
+        home_files.push((".zshrc", &zshrc));
+        home_files.push((&keep, ""));
+        let Some(ran) = (RealShell {
+            name,
+            home_files: &home_files,
+            command: "cd ~/crook-dir-*",
+            then: &[print],
+            ..RealShell::default()
+        })
+        .run() else {
+            continue;
+        };
+        let expected = if name == "zsh" { "POSIX on" } else { "POSIX" };
+        assert_eq!(
+            printed(&ran.seen, "CROOK_LC").as_deref(),
+            Some(expected),
+            "{name} with {setting:?}: {:?}",
+            ran.seen
+        );
+        assert!(
+            !ran.seen.contains("readonly") && !ran.seen.contains("read-only"),
+            "{name} with {setting:?} complained: {:?}",
+            ran.seen
+        );
+        assert_eq!(
+            Some(ran.home.path().join(directory).as_path()),
+            ran.terminal.working_directory(),
+            "{name} with {setting:?}: {:?}",
+            ran.seen
+        );
+    }
 }

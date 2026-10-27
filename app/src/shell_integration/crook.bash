@@ -46,10 +46,39 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
 # Where the shell is, reported the way every terminal reads it: OSC 7. See the
 # zsh integration for why nothing else tells Crook, why the authority is the
-# machine's name, and why both `%` and `;` are escaped in the path. Bash cannot
-# nest the two substitutions the way zsh does, so `%` is escaped into a local
-# first (before `;`, so the `%` in `%3B` is left alone) and `;` in the result.
-__crook_cwd() { local d="${PWD//\%/%25}"; builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "${d//;/%3B}"; }
+# machine's name, and why every byte of the path but a letter, a digit and
+# `/._~-` leaves as its `%XX` code: the same set fish's `string escape
+# --style=url` keeps, so the three shells say the same path the same way.
+#
+# A path of those bytes alone, which is nearly every path, is printed as it
+# is. In any other, `%` becomes `%25` first, and then every other byte that
+# is in it becomes its code everywhere at once: one pass of the path for each
+# byte that occurs in it, which a path of a few hundred is a few dozen of,
+# rather than a step of the shell for every byte of it. In the C locale, so
+# that a byte is what `${rest:0:1}` takes and what `printf "'c"` numbers; and
+# the low byte of that, because bash 3.2 — macOS's /bin/bash — numbers one
+# past 0x7F as a negative `char`, and `%02X` of that is sixteen digits. The
+# bytes are quoted as patterns, so that `*` or `[` is itself. Where a
+# startup file made `LC_ALL` read-only, the `local` is refused, quietly: the
+# bytes past 0x7F then go as characters, and Crook refuses that report and
+# keeps the directory before it.
+__crook_cwd() {
+	local d=$PWD
+	if [[ $d == *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._~-]* ]]; then
+		local LC_ALL=C 2>/dev/null
+		local byte code rest
+		d=${d//\%/%25}
+		rest=${d//[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\/._~%-]/}
+		while [[ -n $rest ]]; do
+			byte=${rest:0:1}
+			rest=${rest//"$byte"/}
+			builtin printf -v code '%d' "'$byte"
+			builtin printf -v code '%%%02X' $((code & 255))
+			d=${d//"$byte"/$code}
+		done
+	fi
+	builtin printf '\e]7;file://%s%s\a' "${__crook_host-}" "$d"
+}
 
 # The name, read once, and not `$HOSTNAME`, for the reason the zsh integration
 # gives for not trusting `$HOST`: bash takes it from the environment when it is

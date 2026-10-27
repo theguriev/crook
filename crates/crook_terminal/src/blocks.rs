@@ -1437,7 +1437,8 @@ impl BlockTracker {
     /// grid: the rows above the open block were erased when the block before
     /// it was harvested, so the first line with anything on it is this
     /// block's own first row. A block that has printed nothing yet anchors
-    /// where the next row will be printed instead.
+    /// where the next character will be printed instead: see
+    /// [`Self::next_row`].
     ///
     /// Anchoring at the oldest line — which is what this used to do — is what
     /// it looks like when that erase is missing: the grid still holds the last
@@ -1476,6 +1477,13 @@ impl BlockTracker {
     /// search is owed to it: [`Self::settle_reflow`] runs it once that screen
     /// is the one on show again.
     pub(crate) fn reflowed<T>(&mut self, term: &Term<T>) {
+        self.found_again(term, false);
+    }
+
+    /// [`Self::reflowed`], knowing the grid holds nothing at all when `blank`:
+    /// no line to look for, which is the cost of a reset that a flood of
+    /// them pays once each.
+    fn found_again<T>(&mut self, term: &Term<T>, blank: bool) {
         if term.mode().contains(TermMode::ALT_SCREEN) {
             self.reflow_owed = true;
             return;
@@ -1487,12 +1495,14 @@ impl BlockTracker {
         // A block whose head has left the grid starts at the head, which is
         // the first of the spilled rows: nothing above the block's first row
         // is ever spilled.
-        let line = if self.spill.is_empty() {
+        let line = if !self.spill.is_empty() {
+            oldest - self.spill.rows() as i32
+        } else if blank {
+            self.next_row(term)
+        } else {
             (oldest..=newest)
                 .find(|line| !is_blank_line(term, *line))
-                .unwrap_or_else(|| last_content_line(term) + 1)
-        } else {
-            oldest - self.spill.rows() as i32
+                .unwrap_or_else(|| self.next_row(term))
         };
 
         self.open.top = Anchor::at(line, 0, term, self.trimmed);
@@ -1509,6 +1519,30 @@ impl BlockTracker {
         // gap it leaves.
         self.open.pictures.clear();
         self.open.reflowed = true;
+    }
+
+    /// Where a block with nothing on the screen yet starts: the row the next
+    /// character printed lands on, which is the cursor's own.
+    ///
+    /// Not the row after a cursor past column zero, the way [`Self::reopen`]
+    /// reads it after a command's output. A screen with nothing on it and
+    /// the cursor in the middle of a row is one a program put it on — a
+    /// picture printed over blank cells leaves it beside the picture, and so
+    /// does a cursor move on a cleared screen — and the program's next line
+    /// starts on that row. A block starting below it would leave the row
+    /// above its top, where nothing is kept: the spill would drop it.
+    ///
+    /// Except in a block a `D` opened, which waits for the shell's prompt.
+    /// fish draws its `⏎` mark of output with no newline on the cursor's row
+    /// after the `D`, before moving to a fresh one, and the prompt start
+    /// after it opens the next block where it lands, so the row below is
+    /// where nothing is lost there.
+    fn next_row<T>(&self, term: &Term<T>) -> i32 {
+        if self.open.state == BlockState::Done {
+            last_content_line(term) + 1
+        } else {
+            (last_content_line(term) + 1).min(term.grid().cursor.point.line.0)
+        }
     }
 
     /// Starts the open block on the row a prompt start has just landed on,
@@ -1642,6 +1676,13 @@ impl BlockTracker {
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
         self.spill.clear();
         self.reflowed(term);
+    }
+
+    /// [`Self::history_cleared`] for RIS, which leaves the screen as blank as
+    /// the history: there is nothing on it to look for.
+    pub(crate) fn reset<T>(&mut self, term: &Term<T>) {
+        self.spill.clear();
+        self.found_again(term, true);
     }
 
     /// Drops every finished block and the grid's history, and keeps the open
@@ -2082,7 +2123,7 @@ impl BlockTracker {
                     _ => None,
                 };
                 self.close(BlockState::Done, exit, term, palette);
-                self.reopen(state, term, whereabouts);
+                self.reopen(state, term, whereabouts, signal == Signal::PromptStart);
                 // Only the shell saying so. A block also closes when the next
                 // prompt arrives or the session ends, and neither of those is
                 // a command reporting how it went — announcing them as one
@@ -2098,7 +2139,7 @@ impl BlockTracker {
             }
             Transition::Terminate => {
                 self.close(BlockState::Terminated, exit, term, palette);
-                self.reopen(BlockState::Terminated, term, whereabouts);
+                self.reopen(BlockState::Terminated, term, whereabouts, false);
             }
         }
         self.last_ignored = None;
@@ -2250,11 +2291,15 @@ impl BlockTracker {
     /// scrollback. It also returns the emulator's own viewport to the live
     /// output, which costs nothing once a block list owns the scrolling: the
     /// rows a reader scrolled back to are in the store.
+    ///
+    /// `at_prompt_start` is for the close a prompt start makes: the block then
+    /// starts on the row that start landed on, whatever column it is in.
     fn reopen<T: EventListener>(
         &mut self,
         state: BlockState,
         term: &mut Term<T>,
         whereabouts: Option<Whereabouts<'_>>,
+        at_prompt_start: bool,
     ) {
         // Where the shell will print next, which is the cursor's own row when
         // it is at column zero and the row after it otherwise. Not the row
@@ -2263,9 +2308,31 @@ impl BlockTracker {
         // shell is about to print over, and anchoring under those would leave
         // the next prompt in a block that says it is empty.
         //
+        // The row after it, because a command's output that did not end in a
+        // newline leaves the cursor on its last row, and what a shell prints
+        // there next is not yet the next command's: after the `D`, fish
+        // draws its `⏎` where the output ended and only then moves to a fresh
+        // row, so anchoring on the cursor's row would put that mark at the top
+        // of the next block. (zsh's `PROMPT_SP` draws its `%` before the `D`,
+        // and the `D` arrives on the fresh row.)
+        //
+        // Except for a prompt start, which says where the prompt is. bash has
+        // nothing like either, and after `printf hello` it draws `A`, the prompt
+        // and `B` on the row the output ended on. A block opened below that
+        // row would have the prompt and the command line above its top, in
+        // nobody's rows: the block before took the row while it read `hello`,
+        // and the erase below leaves the next one its prompt, indented by
+        // the cells the output had. Only the cursor's own row and only when
+        // the prompt really starts there: a prompt start with a wrap pending
+        // starts the prompt on the row below, which is `Anchor::at_input`.
+        //
         // It is also a row the grid may not have yet, and `Anchor::line` is
         // careful not to clamp it into one it does.
-        let top = cursor_line(term) + 1;
+        let top = if at_prompt_start {
+            Anchor::at_input(term, self.trimmed).line(term, self.trimmed)
+        } else {
+            cursor_line(term) + 1
+        };
 
         // The screen the harvest just took a copy of is erased, and the
         // history under it dropped, so that the grid holds the open block and

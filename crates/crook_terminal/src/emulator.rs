@@ -375,18 +375,395 @@ struct OscWatcher {
     /// [`agent::TITLE_BYTES`], which is where the watcher stops: see
     /// [`Emulator::cut_grid_title`].
     long_title: Option<usize>,
+    /// The screen as columns and rows, which is what the work an escape
+    /// costs is counted against: see [`Self::spend`]. Kept up to date by
+    /// [`Emulator`], whose size it is.
+    screen: (usize, usize),
+    /// How many cells the escapes that write a run of them may still write
+    /// in this slice of output — or in this synchronized update, which `vte`
+    /// plays in one go: see [`Self::spend`]. Topped up at the start of every
+    /// slice.
+    work: usize,
+    /// Whether an escape spent more than [`Self::work`] had, which is where
+    /// the watcher stops and the slice ends: see [`Emulator::advance_some`].
+    spent: bool,
+    /// Whether a scroll spent more than [`Self::work`] had, which ends the
+    /// slice too, but not where the scroll is: at the end of the piece, which
+    /// [`Emulator::advance_some`] cuts where [`Emulator::slice_room`] says.
+    /// See [`Self::scroll`].
+    scrolled_out: bool,
+    /// The character printed last, which is the one a REP repeats.
+    printed: Option<char>,
+    /// The [`run_floor`] of the run of [`Self::printed`] going on, worked
+    /// out the first time the run is two long — a character's width is a
+    /// table to look in, and most characters are not printed twice in a
+    /// row — or 0 before then.
+    floor: usize,
+    /// How many of [`Self::printed`] have been printed in a row, by itself
+    /// and by REPs of it, with nothing else read between them: see
+    /// [`Self::repeats`]. Counted as [`run_class`] counts a run.
+    run: usize,
+    /// How many lines of history the shell's screen keeps, at most: what a
+    /// REP has to have scrolled into it before a longer one can be cut and
+    /// leave the history alike. See [`run_floor`].
+    scrollback: usize,
+    /// Whether the alternate screen is up, which keeps no history and is not
+    /// reflowed, as far as the escapes read so far say.
+    alternate: bool,
+    /// Whether a scroll region narrower than the screen is set, where a line
+    /// feed at its foot moves every row of it rather than the screen's top
+    /// row into the history.
+    scrolling_region: bool,
+    /// Whether the terminal inserts what it prints rather than writing over
+    /// it — IRM, `CSI 4 h` — which makes every character of a REP cost a row.
+    inserting: bool,
+    /// What the last thing read was, when it was one of the escapes a second
+    /// of right after it changes nothing: see [`Lately`].
+    lately: Lately,
+    /// What to do instead of the escape the watcher stopped on: see
+    /// [`Emulator::feed_cut`].
+    cut: Option<Cut>,
+    /// Tests: every REP repeats as many times as it asks, for a twin to hold
+    /// the cut ones to.
+    #[cfg(test)]
+    whole_repeats: bool,
 }
 
+/// The last thing the watcher read, when it was an escape that a second of
+/// right after it, with nothing between them, does nothing: see
+/// [`OscWatcher::lately`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Lately {
+    /// Anything else.
+    #[default]
+    Nothing,
+    /// DECALN: a second writes `E` into every cell the first did.
+    Aligned,
+    /// An erase of the screen, of this mode: a second of the same mode, or
+    /// any after a whole one, erases what is erased already — unless the
+    /// pen has a background, which an erase paints and which tells a
+    /// screen's empty rows from erased ones.
+    Erased(u16),
+    /// An erase of the history: a second has nothing to erase.
+    HistoryErased,
+    /// RIS: a second resets what is reset, and erases nothing.
+    Reset,
+}
+
+/// An escape the watcher stopped on, done some other way: see
+/// [`Emulator::feed_cut`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    /// A REP, which repeats its character this many times instead, and
+    /// leaves the same screen.
+    Repeat(usize),
+    /// A DECALN that changes nothing: not done.
+    Skip,
+    /// An erase that changes nothing when the pen has no background: not
+    /// done then, and done when it has one.
+    SkipErase,
+}
+
+impl OscWatcher {
+    /// Takes `cells` off the work this slice may still do; when that is
+    /// more than is left, the slice ends after the escape that asked.
+    ///
+    /// A handful of escapes write every cell of the screen, or a run of
+    /// cells as long as they are told: DECALN, the erases of the screen,
+    /// RIS, a deletion or insertion of lines, a scroll, a REP. Each is a few
+    /// bytes, and a read of nothing but them — 16 KiB, or the 2 MiB a
+    /// synchronized update can hold, which `vte` plays to `Term` in one go —
+    /// held the pane's lock, which the window draws and types through, for
+    /// seconds: 18 s for an update of DECALNs.
+    ///
+    /// So a slice of output may write the screen's cells [`WORK_SCREENS`]
+    /// times over, and [`WORK_CELLS_PER_BYTE`] more for every byte of it.
+    /// Past that, the escape is done whole and the slice ends there, which
+    /// is a read the pty could have cut at that byte: the lock is let go,
+    /// and the rest is fed as a slice of its own. Nothing is lost or done
+    /// differently. An update draws on what the slice it began in had, and
+    /// when that runs out it is let go of, as one that ran out of time is,
+    /// and the rest of it is drawn as it arrives.
+    fn spend(&mut self, cells: usize) {
+        match self.work.checked_sub(cells) {
+            Some(left) => self.work = left,
+            None => {
+                self.work = 0;
+                self.spent = true;
+            }
+        }
+    }
+
+    /// [`Self::spend`] for an escape that scrolls: a scroll of the screen
+    /// or of lines in it, a line feed or an index at the edge of a scroll
+    /// region.
+    ///
+    /// These the slice does not end on. A flood of them is fed in the slices
+    /// [`Emulator::slice_room`] cuts it into — on a tall screen over a short
+    /// scrollback, slices whole, since most of what a whole slice scrolls
+    /// leaves the history unharvested, which is cheaper than harvesting it a
+    /// short slice at a time — so a slice ends at the end of one of those,
+    /// and its scrolls are as dear as that slice is. The slice of work is
+    /// cut by the slice of bytes there, rather than every few scrolls.
+    fn scroll(&mut self, cells: usize) {
+        match self.work.checked_sub(cells) {
+            Some(left) => self.work = left,
+            None => {
+                self.work = 0;
+                self.scrolled_out = true;
+            }
+        }
+    }
+
+    /// Tops [`Self::work`] up for a slice of `bytes`: afresh, or not at all
+    /// while a synchronized update is being held, since the update is played
+    /// in one go however many slices it took.
+    fn slice(&mut self, bytes: usize, updating: bool, alternate: bool) {
+        if !updating {
+            self.alternate = alternate;
+            let (columns, rows) = self.screen;
+            self.work = (columns * rows * WORK_SCREENS)
+                .saturating_add(bytes.saturating_mul(WORK_CELLS_PER_BYTE));
+        }
+    }
+
+    /// Forgets that the last thing read was one of the escapes a second of
+    /// changes nothing, and that a run of one character was going on:
+    /// anything at all read between two of them can change the screen, and
+    /// so can anything done to the emulator but feeding it — a resize, a
+    /// clear, a block closed by the shell's exit — which is told so between
+    /// two slices with [`Emulator::interrupt_runs`]. Not a slice ending, which
+    /// is only a read the pty could have cut there.
+    fn other(&mut self) {
+        self.lately = Lately::Nothing;
+        self.run = 0;
+    }
+
+    /// How many times a REP that asked for `asked` repeats its character,
+    /// taking that many cells of [`Self::work`].
+    ///
+    /// No more than leaves the screen and the cursor as the whole run would
+    /// have. A run that has wrapped from row to row twice as many times as
+    /// the screen has rows has scrolled in every row the screen shows, and
+    /// filled every one but the cursor's, which it has filled as far as the
+    /// cursor; every `per_row` characters more fill one more row the same
+    /// way and leave the cursor where it was. So once the run — what this
+    /// REP repeats, and the copies of its character printed right before it,
+    /// by itself or by REPs — is [`run_floor`] or longer, this REP is cut to
+    /// the count at or past that which leaves the cursor in the same column:
+    /// the rows the rest would have scrolled into the history, copies of the
+    /// one character, are what goes. A wide character fills a row with half
+    /// as many.
+    ///
+    /// The same while the terminal inserts, since every row the screen shows
+    /// is a fresh one the run pushed nothing out of; each character costs a
+    /// row there, which is what pushing the rest of it along takes.
+    ///
+    /// A character `Term` does not print goes nowhere, and once is as good
+    /// as any number. A combining mark goes on the cell before it, every
+    /// copy of it, and is repeated [`ZERO_WIDTH_REPEATS`] times at most:
+    /// past that a REP would be a way to put a megabyte on one cell for
+    /// every eight bytes.
+    fn repeats(&mut self, asked: usize) -> usize {
+        let (columns, rows) = self.screen;
+        let run = std::mem::take(&mut self.run);
+        let Some(width) = self
+            .printed
+            .and_then(unicode_width::UnicodeWidthChar::width)
+        else {
+            return asked.min(1);
+        };
+        if width == 0 {
+            let repeats = asked.min(ZERO_WIDTH_REPEATS);
+            self.spend(repeats);
+            return repeats;
+        }
+        // A character the terminal inserts pushes the rest of its row along.
+        let cost = if self.inserting { columns.max(1) } else { 1 };
+        let per_row = columns / width;
+        if per_row == 0 {
+            self.spend(asked.saturating_mul(cost));
+            return asked;
+        }
+        let floor = run_floor(rows, per_row, self.kept());
+        #[cfg(test)]
+        let floor = if self.whole_repeats {
+            usize::MAX / 2
+        } else {
+            floor
+        };
+        let repeats = if run + asked < floor + per_row {
+            asked
+        } else {
+            // The fewest at or past what takes the run to `floor` that leave
+            // the cursor where `asked` would have.
+            let least = floor.saturating_sub(run);
+            let column = asked % per_row;
+            if column >= least {
+                column
+            } else {
+                column + (least - column).div_ceil(per_row) * per_row
+            }
+        };
+        self.run = run_class(run + repeats, floor, per_row);
+        self.floor = floor;
+        self.spend(repeats.saturating_mul(cost));
+        repeats
+    }
+
+    /// Works out the floor of the run going on, if it has not been, and
+    /// counts the run as the shortest that leaves the same screen once it is
+    /// past it: see [`run_class`]. A run of a character that goes nowhere a
+    /// second copy would change is no run.
+    fn settle_run(&mut self) {
+        let (columns, rows) = self.screen;
+        let per_row = match self
+            .printed
+            .and_then(unicode_width::UnicodeWidthChar::width)
+        {
+            Some(width @ 1..) => columns / width,
+            _ => 0,
+        };
+        if per_row == 0 {
+            self.run = 0;
+            return;
+        }
+        if self.floor == 0 {
+            self.floor = run_floor(rows, per_row, self.kept());
+            #[cfg(test)]
+            if self.whole_repeats {
+                self.floor = usize::MAX / 2;
+            }
+        }
+        self.run = run_class(self.run, self.floor, per_row);
+    }
+
+    /// How many lines of history the screen a REP prints on keeps.
+    fn kept(&self) -> usize {
+        if self.alternate { 0 } else { self.scrollback }
+    }
+}
+
+/// How long a run of one character has to be before what it leaves — on a
+/// screen of `rows` and in a history of `kept` lines — depends only on how
+/// far along its row it ends: its first row, however much of it the run
+/// has, and two screenfuls and the whole history after it.
+///
+/// The whole history, so that every row it keeps is a row of the character
+/// either way, and a column change reflows the same rows: the rows a longer
+/// run would push past it are the ones it would let go of. The alternate
+/// screen keeps none, and is not reflowed.
+///
+/// Two screenfuls, so that every row on the screen is one the run scrolled
+/// in fresh, and so is the row after each. A row the cursor came down to
+/// instead keeps what was on it until the run writes over it, and writing a
+/// character over a wide one at the start of a row takes the mark off the
+/// row before that says the wide character was moved down from its end.
+fn run_floor(rows: usize, per_row: usize, kept: usize) -> usize {
+    (kept + 2 * rows + 1).saturating_mul(per_row)
+}
+
+/// A run of `length` copies of one character, counted as the shortest run
+/// that leaves the same screen: see [`OscWatcher::repeats`].
+fn run_class(length: usize, floor: usize, per_row: usize) -> usize {
+    if length < floor {
+        length
+    } else {
+        floor + (length - floor) % per_row
+    }
+}
+
+/// How many screenfuls of cells a slice may write with escapes that write
+/// runs of them: see [`OscWatcher::spend`].
+const WORK_SCREENS: usize = 4;
+
+/// How many cells more a slice may write with those escapes for every byte
+/// of it: see [`OscWatcher::spend`]. Writing a cell costs `Term` a tenth of
+/// what parsing a byte of text and printing it does, or less, so a slice of
+/// nothing but such escapes costs about what a slice of text does.
+const WORK_CELLS_PER_BYTE: usize = 8;
+
+/// The most times a REP repeats a combining mark: see
+/// [`OscWatcher::repeats`]. More than any grapheme carries.
+const ZERO_WIDTH_REPEATS: usize = 16;
+
 impl Perform for OscWatcher {
-    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+    fn print(&mut self, c: char) {
+        self.lately = Lately::Nothing;
+        if self.printed == Some(c) && self.run > 0 {
+            self.run += 1;
+            if self.run >= self.floor {
+                self.settle_run();
+            }
+        } else {
+            self.printed = Some(c);
+            self.run = 1;
+            self.floor = 0;
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        self.other();
+        // A line feed at the foot of a scroll region moves every row of it.
+        if self.scrolling_region && matches!(byte, b'\n' | 0x0b | 0x0c) {
+            let (columns, rows) = self.screen;
+            self.scroll(columns + rows);
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        self.other();
+    }
+
+    fn put(&mut self, _byte: u8) {
+        self.other();
+    }
+
+    fn unhook(&mut self) {
+        self.other();
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        let lately = self.lately;
+        self.other();
+        let (columns, rows) = self.screen;
+        // DECALN, which `vte` takes for one with no more than this.
+        if intermediates == b"#" && byte == b'8' && !ignore {
+            if lately == Lately::Aligned {
+                self.cut = Some(Cut::Skip);
+            } else {
+                self.spend(columns * rows);
+            }
+            self.lately = Lately::Aligned;
+            return;
+        }
+        // IND and NEL, which move every row of a scroll region at its foot,
+        // and RI, which does at its head, and at the head of the screen.
+        if intermediates.is_empty() && !ignore {
+            match byte {
+                b'D' | b'E' if self.scrolling_region => self.scroll(columns + rows),
+                b'M' => self.scroll(columns + rows),
+                _ => {}
+            }
+        }
         if intermediates.is_empty() && byte == b'c' {
-            self.reset = true;
+            // A second has nothing left to reset, and the blocks nothing to
+            // find again: no stop for it.
+            self.reset = lately != Lately::Reset;
+            self.lately = Lately::Reset;
+            self.inserting = false;
+            self.scrolling_region = false;
+            self.alternate = false;
+            self.spend(columns * rows);
             // `Term` resets every mode it keeps, and this one goes with them.
             self.scheme_reports = false;
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        let lately = self.lately;
+        let run = self.run;
+        self.other();
         let first = params.iter().next();
         // What `vte` reads a mode or a report's number from: the first
         // parameter, less any subparameters after it.
@@ -394,8 +771,11 @@ impl Perform for OscWatcher {
         match (action, intermediates) {
             // Only the plain form: `CSI ? 3 J` is the selective erase, which
             // leaves the history alone.
+            // Not a stop when there is nothing left to erase: right after
+            // another, or after RIS.
             ('J', []) if first.is_some_and(|param| param == [3]) => {
-                self.history_cleared = true;
+                self.history_cleared |= !matches!(lately, Lately::HistoryErased | Lately::Reset);
+                self.lately = Lately::HistoryErased;
             }
             // XTVERSION takes no parameter but 0, which is also what an
             // empty one parses as.
@@ -404,12 +784,77 @@ impl Perform for OscWatcher {
             }
             // Among other modes, maybe: `Term` sets each one in turn.
             ('h' | 'l', [b'?']) => {
+                let (columns, rows) = self.screen;
                 for mode in params.iter().filter_map(|param| param.first()) {
                     match mode {
                         1049 => self.screen_switched = true,
                         2031 => self.scheme_reports = action == 'h',
                         _ => {}
                     }
+                    // DECCOLM erases the screen, and a switch of screens can.
+                    if matches!(mode, 3 | 47 | 1047 | 1049) {
+                        self.spend(columns * rows);
+                    }
+                    if matches!(mode, 47 | 1047 | 1049) {
+                        self.alternate = action == 'h';
+                    }
+                }
+            }
+            // `vte` reads a count of 0, or none, as 1, and drops a sequence
+            // it is ignoring the rest of.
+            ('b', []) if !ignore => {
+                self.run = run;
+                let asked = usize::from(number.unwrap_or(1).max(1));
+                let repeats = self.repeats(asked);
+                if repeats != asked {
+                    self.cut = Some(Cut::Repeat(repeats));
+                }
+            }
+            // The erases of the screen or part of it, and the scrolls and
+            // the deletions and insertions of lines, which move every row
+            // below the cursor: each writes as many cells as the screen has,
+            // or as the lines it moves have. The erase of the history is a
+            // stop of its own, above.
+            ('J', []) if !ignore && number.is_none_or(|mode| mode <= 2) => {
+                let mode = number.unwrap_or(0);
+                // Priced either way: inside an update, which `Term` has not
+                // been given the pen of yet, it is done after all.
+                let (columns, rows) = self.screen;
+                self.spend(columns * rows);
+                if matches!(lately, Lately::Erased(before) if before == 2 || before == mode) {
+                    self.cut = Some(Cut::SkipErase);
+                    self.lately = lately;
+                } else {
+                    self.lately = Lately::Erased(mode);
+                }
+            }
+            ('L' | 'M' | 'S' | 'T', []) if !ignore => {
+                let (columns, rows) = self.screen;
+                let lines = usize::from(number.unwrap_or(1).max(1)).min(rows);
+                self.scroll(columns * lines);
+            }
+            // Insertions, erasures and deletions of characters, each as much
+            // of a row as they are told.
+            ('@' | 'X' | 'P', []) if !ignore => {
+                let (columns, _) = self.screen;
+                self.spend(usize::from(number.unwrap_or(1).max(1)).min(columns));
+            }
+            // A scroll region, which makes a line feed at its foot move every
+            // row of it: anything but the whole screen.
+            ('r', []) if !ignore => {
+                let (_, rows) = self.screen;
+                let mut bounds = params
+                    .iter()
+                    .map(|param| param.first().copied().unwrap_or(0));
+                let top = bounds.next().unwrap_or(0).max(1);
+                let bottom = bounds.next().filter(|bottom| *bottom != 0);
+                self.scrolling_region =
+                    top > 1 || bottom.is_some_and(|bottom| usize::from(bottom) < rows);
+            }
+            // IRM, among whatever other modes are set or reset with it.
+            ('h' | 'l', []) if !ignore => {
+                if params.iter().any(|param| param.first() == Some(&4)) {
+                    self.inserting = action == 'h';
                 }
             }
             ('n', [b'?']) if number == Some(996) => self.scheme_asked = true,
@@ -419,9 +864,16 @@ impl Perform for OscWatcher {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.other();
         match params.first() {
-            Some(&b"7") if params.len() >= 2 => {
-                if let Some(reported) = parse_working_directory(params[1]) {
+            // `vte` keeps 16 fields of an OSC and drops the rest, so a report
+            // that filled them may have lost the end of its path: no answer.
+            // Crook's own integrations send a `;` as `%3B` and never get here.
+            Some(&b"7") if (2..OSC_FIELDS).contains(&params.len()) => {
+                // The terminal splits an OSC on `;`, and a path is not split:
+                // a shell that left one in its report is put back together.
+                let value = params[1..].join(&b';');
+                if let Some(reported) = parse_working_directory(&value) {
                     self.working_directory = Some(reported);
                 }
             }
@@ -540,6 +992,8 @@ impl Perform for OscWatcher {
             || self.background_set
             || self.history_cleared
             || self.reset
+            || self.cut.is_some()
+            || self.spent
     }
 }
 
@@ -628,6 +1082,10 @@ const HOST_BYTES: usize = 255;
 /// can cost; ending it costs a frame drawn half done.
 const UPDATE_TITLE_BYTES: usize = 4096;
 
+/// How many fields `vte` splits an OSC into at most, dropping the rest: its
+/// `MAX_OSC_PARAMS`, which it does not export.
+const OSC_FIELDS: usize = 16;
+
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path, into
 /// the host the URL named and the path.
 ///
@@ -642,6 +1100,12 @@ const UPDATE_TITLE_BYTES: usize = 4096;
 /// and neither is a host longer than [`HOST_BYTES`] or one holding a control
 /// character or a space, since no machine is called that and the row would
 /// print it.
+///
+/// Nor is a path holding a control character, which the shell integrations
+/// send as a `%XX` code so that it cannot end the report or follow it as
+/// output. Decoded, it would be a directory that a row prints and that a
+/// command line typed into a shell carries: an ESC a line editor reads as
+/// the start of a key. The directory before it stays the answer.
 fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
     let value = str::from_utf8(value).ok()?;
     let (host, path) = match value.strip_prefix("file://") {
@@ -661,6 +1125,9 @@ fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
     }
 
     let decoded = percent_decode(path)?;
+    if decoded.chars().any(char::is_control) {
+        return None;
+    }
     // A Windows path arrives as `/C:/Users/...`; the leading slash is part of
     // the URL, not of the path.
     let decoded = if cfg!(windows) && is_drive_prefixed(&decoded) {
@@ -678,6 +1145,12 @@ fn parse_working_directory(value: &[u8]) -> Option<(Option<String>, PathBuf)> {
         .then(|| (host.map(str::to_owned), PathBuf::from(decoded)))
 }
 
+/// A screen of `size` as the columns and rows the work an escape costs is
+/// counted in: see [`OscWatcher::spend`].
+fn screen_of(size: TerminalSize) -> (usize, usize) {
+    (size.columns(), size.screen_lines())
+}
+
 /// Whether a URL path is a Windows path with its leading slash still attached.
 fn is_drive_prefixed(path: &str) -> bool {
     let mut chars = path.chars();
@@ -688,7 +1161,8 @@ fn is_drive_prefixed(path: &str) -> bool {
         && chars.next() == Some(':')
 }
 
-/// Undoes the percent-encoding an OSC 7 URL uses for spaces and non-ASCII.
+/// Undoes the percent-encoding an OSC 7 URL uses for every byte outside a
+/// small set.
 fn percent_decode(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -836,6 +1310,12 @@ pub struct Emulator {
     /// Whether the synchronized update `parser` is holding switches screens,
     /// which the watcher saw go by: see [`Self::switch_screens`].
     switch_held: bool,
+    /// Whether the synchronized update `parser` is holding erases the
+    /// history — RIS, `CSI 3 J` — which the watcher saw go by: the open
+    /// block is found again once `Term` has been given it, in
+    /// [`Self::update_let_go`]. Found again before, it is found on the
+    /// screen as it was before the update, and anchored there.
+    clear_held: bool,
     /// Whether the synchronized update `parser` is holding sets or gives
     /// back the program's own background, which the watcher saw go by and
     /// `Term` has not: what the background is, dark or light, is not known
@@ -945,7 +1425,11 @@ impl Emulator {
             term,
             parser: Processor::new(),
             osc_parser: Parser::new(),
-            osc_watcher: OscWatcher::default(),
+            osc_watcher: OscWatcher {
+                screen: screen_of(size),
+                scrollback: scrollback_lines.saturating_add(HISTORY_HEADROOM),
+                ..OscWatcher::default()
+            },
             blocks,
             proxy,
             palette,
@@ -962,6 +1446,7 @@ impl Emulator {
             #[cfg(test)]
             overgrown_slices: 0,
             switch_held: false,
+            clear_held: false,
             background_held: false,
             switched_from: None,
             title: None,
@@ -1006,12 +1491,47 @@ impl Emulator {
     /// it is anchoring against a screen that has not been drawn yet — and a
     /// program drawing frames is on the alternate screen, where marks are
     /// ignored outright.
+    ///
+    /// All of `bytes`, however much work they are: a slice at a time as
+    /// [`Self::advance_some`] takes them, one after the other. A caller that
+    /// holds a lock for the parse wants that one instead, and to let the lock
+    /// go between slices.
     pub fn advance(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            rest = &rest[self.advance_some(rest)..];
+        }
+    }
+
+    /// Tells the watcher that something other than output has changed the
+    /// grid or its history, so that what it has read so far says nothing
+    /// about what the next escape does: see [`OscWatcher::other`].
+    fn interrupt_runs(&mut self) {
+        self.osc_watcher.other();
+    }
+
+    /// Feeds the child's output into the grid as [`Self::advance`] does, as
+    /// far as one slice of work goes, and says how many bytes that took.
+    ///
+    /// The slice ends after an escape that wrote more cells than the slice
+    /// had left — four screenfuls, and eight cells for every byte, of the
+    /// escapes that write the screen or a run of it: DECALN, the erases,
+    /// RIS, line moves and scrolls, REP — and the rest is the caller's to
+    /// feed in another call: what the pty would have done had it cut its read
+    /// at that byte, so nothing is fed any differently for it. A caller that
+    /// parses under a lock the window draws and types through lets it go
+    /// between the two, and a flood of escapes that each write the whole
+    /// screen holds it for a slice at a time rather than for seconds. Every
+    /// byte is taken when nothing in them asks for that much.
+    pub fn advance_some(&mut self, bytes: &[u8]) -> usize {
         self.expire_sync();
         if bytes.is_empty() {
-            return;
+            return 0;
         }
         self.osc_watcher.asks_done_read = 0;
+        let updating = self.updating();
+        let alternate = self.term.mode().contains(TermMode::ALT_SCREEN);
+        self.osc_watcher.slice(bytes.len(), updating, alternate);
 
         let mut view = self.view();
         let mut exited = None;
@@ -1021,14 +1541,29 @@ impl Emulator {
         let mut line_finished = false;
         let mut rest = bytes;
         while !rest.is_empty() {
+            // No longer than a slice [`Self::feed`] would feed whole, so that
+            // a piece the watcher ends nowhere ends where a slice would.
+            let room = self.slice_room().min(rest.len());
             let consumed = self
                 .osc_parser
-                .advance_until_terminated(&mut self.osc_watcher, rest);
+                .advance_until_terminated(&mut self.osc_watcher, &rest[..room]);
             let (piece, remaining) = rest.split_at(consumed);
             if std::mem::take(&mut self.osc_watcher.screen_switched) {
                 self.switch_screens(piece, &mut view);
+            } else if let Some(cut) = self.osc_watcher.cut.take() {
+                self.feed_cut(piece, cut);
             } else {
                 self.feed(piece);
+            }
+            // The slice's work is spent: it ends with this piece. An update
+            // being held would play what it holds in one go when it ends, so
+            // it is let go of now, as one that ran out of time is, and the
+            // rest of it is drawn as it arrives.
+            let spent = std::mem::take(&mut self.osc_watcher.spent)
+                | std::mem::take(&mut self.osc_watcher.scrolled_out);
+            if spent && self.updating() {
+                self.parser.stop_sync(&mut self.term);
+                self.update_let_go(true);
             }
             // Before anything answers from the background. The piece ends on
             // the escape that set it, so an update held now holds that
@@ -1047,7 +1582,14 @@ impl Emulator {
             // the shell's screen is back, as it is after a reflow there.
             let erased = std::mem::take(&mut self.osc_watcher.history_cleared)
                 && !self.term.mode().contains(TermMode::ALT_SCREEN);
-            if std::mem::take(&mut self.osc_watcher.reset) || erased {
+            // The piece ends on the reset, so the screen is as blank as the
+            // history.
+            let reset = std::mem::take(&mut self.osc_watcher.reset);
+            if (reset || erased) && self.updating() {
+                self.clear_held = true;
+            } else if reset {
+                self.blocks.reset(&self.term);
+            } else if erased {
                 self.blocks.history_cleared(&self.term);
             }
             // The piece ends on the query, and `Term` has queued the answers
@@ -1152,6 +1694,9 @@ impl Emulator {
                 self.place_image(requested);
             }
             rest = remaining;
+            if spent {
+                break;
+            }
         }
         self.give_keys_back(line_finished);
         self.keep_view(view);
@@ -1160,6 +1705,7 @@ impl Emulator {
         if let Some(exit) = exited {
             self.child_exited(exit);
         }
+        bytes.len() - rest.len()
     }
 
     /// Puts a picture at the cursor, in the open block, and moves the cursor
@@ -1265,6 +1811,39 @@ impl Emulator {
         }
     }
 
+    /// Feeds a piece the watcher stopped on an escape at that is done another
+    /// way, as `cut` says: a REP with a count that leaves the same screen,
+    /// and an alignment or an erase that would change nothing, not at all.
+    /// See [`OscWatcher::repeats`] and [`Lately`].
+    ///
+    /// The piece ends on the escape's final byte, and `vte` has read the rest
+    /// of it, maybe in an earlier read. Fed a CAN instead of that byte, it
+    /// ends the sequence and does nothing, and keeps the character a REP is
+    /// for; a REP fed after it is the one that repeats it.
+    ///
+    /// Whether the pen has a background is read once the rest of the piece
+    /// is in, which may be what set it, and is not known at all while an
+    /// update is held: an erase is done then.
+    fn feed_cut(&mut self, piece: &[u8], cut: Cut) {
+        use alacritty_terminal::vte::ansi::Color as AnsiColor;
+        let Some((last, before)) = piece.split_last() else {
+            return;
+        };
+        self.feed(before);
+        // Inside an update `Term` has not seen the colours the update set,
+        // so its pen says nothing about the one the erase paints with.
+        let pen = self.term.grid().cursor.template.bg;
+        let painted = self.updating() || pen != AnsiColor::Named(NamedColor::Background);
+        if cut == Cut::SkipErase && painted {
+            self.feed(std::slice::from_ref(last));
+            return;
+        }
+        self.feed(b"\x18");
+        if let Cut::Repeat(repeats @ 1..) = cut {
+            self.feed(format!("\x1b[{repeats}b").as_bytes());
+        }
+    }
+
     /// Feeds a piece the watcher stopped on a switch of screens at, cutting
     /// the shell's history back before the switch's last byte goes in and
     /// after it has.
@@ -1346,7 +1925,13 @@ impl Emulator {
     /// answers. See [`Self::set_palette`]. That is once it was `played`, its
     /// bytes handed to `Term`, whether or not `vte` is holding another that
     /// opened behind its end.
+    ///
+    /// And one that erased the history has erased it now, and the open block
+    /// is found again on what is there: see [`Self::clear_held`].
     fn update_let_go(&mut self, played: bool) {
+        if played && std::mem::take(&mut self.clear_held) {
+            self.blocks.history_cleared(&self.term);
+        }
         if self.switch_held {
             self.blocks.update_switched_screens(&self.term);
             self.switch_held = self.updating();
@@ -1419,7 +2004,8 @@ impl Emulator {
     /// byte at most: text, newlines, and every escape but a few. Those few
     /// scroll a screenful or more in a handful of bytes — `CSI n S`, an erase
     /// of a screen with something on it, which alacritty pushes into the
-    /// history, lines deleted at the top of a scroll region — so a slice of
+    /// history, lines deleted at the top of a scroll region, a REP, whose
+    /// screenful of one character wraps from row to row — so a slice of
     /// them can take the history past alacritty's room, and what it evicts
     /// there goes uncounted. That is caught after the slice rather than
     /// prevented, by [`BlockTracker::trim_history`]: the history is full,
@@ -1541,6 +2127,7 @@ impl Emulator {
     /// [`Self::advance_mirrored`] turns back into a call to this at the same
     /// point in the stream.
     pub fn command_submitted(&mut self, command: &str) {
+        self.interrupt_runs();
         self.blocks.submitted(
             command,
             &mut self.term,
@@ -1641,6 +2228,7 @@ impl Emulator {
     /// asks for none of them has what is typed counted, and costs the line
     /// that [`Self::hand_keys_to_line_editor`] says a `read` does.
     pub fn typed(&mut self, bytes: &[u8]) {
+        self.interrupt_runs();
         if self.line_editor && !self.blocks.at_prompt() && !self.reads_its_own_keys() {
             self.typed_ahead.add(bytes);
         }
@@ -1732,6 +2320,7 @@ impl Emulator {
     /// with something to keep of them: what the last command exited with
     /// still answers whether the pane's command has finished.
     pub fn clear_blocks(&mut self) -> Vec<Arc<Block>> {
+        self.interrupt_runs();
         let dropped = self.blocks.clear(&mut self.term);
         self.above = 0;
         self.dirty = true;
@@ -1822,6 +2411,7 @@ impl Emulator {
     /// This does not tell the child process anything; only the pty can do that.
     /// [`crate::Terminal::resize`] does both.
     pub fn resize(&mut self, size: TerminalSize) {
+        self.interrupt_runs();
         let columns_changed = size.columns != self.size.columns;
         let rows_changed = size.rows != self.size.rows;
         let shortened = size.rows < self.size.rows;
@@ -1832,6 +2422,7 @@ impl Emulator {
         if !geometry_changed {
             return;
         }
+        self.osc_watcher.screen = screen_of(size);
         let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
         // The grid's share follows the screen, so that a taller one finds
         // its rows in the history: see [`Self::grid_share`].
@@ -2189,6 +2780,7 @@ impl Emulator {
     /// anything still printing on the pty afterwards is a child that outlived
     /// it, so no later mark reopens the session.
     pub(crate) fn child_exited(&mut self, exit: ChildExit) {
+        self.interrupt_runs();
         self.events.push(TerminalEvent::ChildExited(exit));
         // Nothing is left to give it back, and a pane whose shell has gone
         // draws what it left the way it always has.
@@ -2707,3 +3299,7 @@ mod tests;
 #[cfg(test)]
 #[path = "spill_tests.rs"]
 mod spill_tests;
+
+#[cfg(test)]
+#[path = "flood_tests.rs"]
+mod flood_tests;
