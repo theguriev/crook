@@ -59,10 +59,20 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::protocol::{BlocksRead, Follow, NewTab, PaneEntry, ReadBlocks, Until, Wait, Waited};
+use super::protocol::{
+    BlocksRead, ClosePane, Follow, NewTab, PaneEntry, ReadBlocks, SplitPane, SplitSide, Until,
+    Wait, Waited,
+};
 
 /// What `crook pane` takes after it, for the refusal that lists it.
-const VERBS: &str = "list, wait or blocks";
+const VERBS: &str = "list, wait, blocks, split or close";
+
+/// How `crook pane split` is spelled, for the refusals that show it.
+const PANE_SPLIT: &str = "crook pane split [--right|--down] [--beside <ID>] [--title <TITLE>] \
+                          [--cwd <DIR>] [--json] -- <COMMAND>…";
+
+/// How `crook pane close` is spelled, for the refusals that show it.
+const PANE_CLOSE: &str = "crook pane close <ID> [--json]";
 
 /// How `crook pane wait` is spelled, for the refusals that show it.
 const PANE_WAIT: &str =
@@ -75,8 +85,8 @@ const PANE_BLOCKS: &str = "crook pane blocks <ID> [--last <N>] [--json]";
 const EVENTS: &str = "crook events --follow [--pane <ID>]";
 
 /// How `crook tab new` is spelled, for the refusals that show it.
-const TAB_NEW: &str =
-    "crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>…";
+const TAB_NEW: &str = "crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] \
+                       [--cwd <DIR>] [--json] -- <COMMAND>…";
 
 /// What a command prints, and whether it then fails.
 #[derive(Debug, PartialEq, Eq)]
@@ -124,6 +134,20 @@ pub enum PaneCommand {
         /// `--json`.
         json: bool,
     },
+    /// `split`: the pane to open, and whether to print the answer as JSON.
+    Split {
+        /// What to run, and where.
+        asked: SplitPane,
+        /// `--json`.
+        json: bool,
+    },
+    /// `close`: which, and whether to print the answer as JSON.
+    Close {
+        /// The pane.
+        asked: ClosePane,
+        /// `--json`.
+        json: bool,
+    },
 }
 
 /// Answers `crook pane …`, given everything after `pane`, with the text to
@@ -133,7 +157,26 @@ pub fn pane(args: impl Iterator<Item = String>) -> Result<Printed> {
         PaneCommand::List { json } => listed(json).map(Printed::from),
         PaneCommand::Wait { asked, json } => waited(asked, json),
         PaneCommand::Blocks { asked, json } => blocks(asked, json).map(Printed::from),
+        PaneCommand::Split { mut asked, json } => {
+            asked.cwd = asked.cwd.map(|cwd| directory_here(&cwd)).transpose()?;
+            split(asked, json)
+        }
+        PaneCommand::Close { asked, json } => close(asked, json).map(Printed::from),
     }
+}
+
+/// The directory `--cwd` names, absolute and checked to be one: the window
+/// takes the path as it is given and does not look at the disk for it, so
+/// the look is made here, where a mistyped path can still be said.
+fn directory_here(cwd: &str) -> Result<String> {
+    let path = std::path::absolute(cwd)
+        .with_context(|| format!("`--cwd` {cwd} is not a path this machine can name"))?;
+    if !path.is_dir() {
+        bail!("`--cwd` {} is not a directory", path.display());
+    }
+    path.into_os_string()
+        .into_string()
+        .map_err(|path| anyhow::anyhow!("`--cwd` {} is not text", Path::new(&path).display()))
 }
 
 /// Follows `crook events …`, given everything after `events`, writing each
@@ -146,7 +189,8 @@ pub fn events(args: impl Iterator<Item = String>) -> Result<()> {
 /// Answers `crook tab …`, given everything after `tab`, with the text to
 /// print: the new pane's number, or the window's answer as JSON.
 pub fn tab(args: impl Iterator<Item = String>) -> Result<Printed> {
-    let (asked, json) = tab_arguments(args)?;
+    let (mut asked, json) = tab_arguments(args)?;
+    asked.cwd = asked.cwd.map(|cwd| directory_here(&cwd)).transpose()?;
     opened(asked, json)
 }
 
@@ -178,9 +222,12 @@ pub fn tab_arguments(mut args: impl Iterator<Item = String>) -> Result<(NewTab, 
             "--title" if asked.title.is_none() => {
                 asked.title = Some(value_of(&mut args, "--title")?);
             }
+            "--cwd" if asked.cwd.is_none() => {
+                asked.cwd = Some(value_of(&mut args, "--cwd")?);
+            }
             "--in-my-group" if !asked.in_my_group => asked.in_my_group = true,
             "--json" if !json => json = true,
-            flag @ ("--worktree" | "--title" | "--in-my-group" | "--json") => {
+            flag @ ("--worktree" | "--title" | "--cwd" | "--in-my-group" | "--json") => {
                 bail!("`{flag}` was given twice")
             }
             other => bail!("unrecognised argument {other}; the command goes after `--`: {TAB_NEW}"),
@@ -280,6 +327,62 @@ pub fn pane_arguments(mut args: impl Iterator<Item = String>) -> Result<PaneComm
                 json,
             })
         }
+        "split" => {
+            let (mut asked, mut json, mut side, mut command) =
+                (SplitPane::default(), false, None, None);
+            while let Some(argument) = args.next() {
+                match argument.as_str() {
+                    "--" => {
+                        command = Some(args.by_ref().collect::<Vec<_>>());
+                        break;
+                    }
+                    "--right" | "--down" if side.is_none() => {
+                        side = SplitSide::from_word(&argument[2..]);
+                    }
+                    "--beside" if asked.beside.is_none() => {
+                        let pane = value_after(&mut args, "--beside", PANE_SPLIT)?;
+                        asked.beside = Some(pane_number(&pane, None, PANE_SPLIT)?);
+                    }
+                    "--title" if asked.title.is_none() => {
+                        asked.title = Some(value_after(&mut args, "--title", PANE_SPLIT)?);
+                    }
+                    "--cwd" if asked.cwd.is_none() => {
+                        asked.cwd = Some(value_after(&mut args, "--cwd", PANE_SPLIT)?);
+                    }
+                    "--json" if !json => json = true,
+                    "--right" | "--down" => bail!("one of --right and --down: {PANE_SPLIT}"),
+                    flag @ ("--beside" | "--title" | "--cwd" | "--json") => {
+                        bail!("`{flag}` was given twice")
+                    }
+                    other => bail!(
+                        "unrecognised argument {other}; the command goes after `--`: {PANE_SPLIT}"
+                    ),
+                }
+            }
+            asked.direction = side.unwrap_or_default();
+            asked.command = command
+                .filter(|command| !command.is_empty())
+                .with_context(|| {
+                    format!("`crook pane split` needs a command after `--`: {PANE_SPLIT}")
+                })?;
+            Ok(PaneCommand::Split { asked, json })
+        }
+        "close" => {
+            let (mut json, mut pane) = (false, None);
+            for argument in args {
+                match argument.as_str() {
+                    "--json" if !json => json = true,
+                    "--json" => bail!("`--json` was given twice"),
+                    other => pane = Some(pane_number(other, pane, PANE_CLOSE)?),
+                }
+            }
+            let pane =
+                pane.with_context(|| format!("`crook pane close` needs a pane: {PANE_CLOSE}"))?;
+            Ok(PaneCommand::Close {
+                asked: ClosePane { pane },
+                json,
+            })
+        }
         verb => bail!("`crook pane` takes {VERBS}, not {verb}"),
     }
 }
@@ -368,6 +471,27 @@ fn blocks(asked: ReadBlocks, json: bool) -> Result<String> {
 }
 
 #[cfg(not(unix))]
+fn split(asked: SplitPane, json: bool) -> Result<Printed> {
+    let flag = if json { " --json" } else { "" };
+    bail!(
+        "`crook pane split --{}{flag} -- {}` is not available on this platform yet: a window \
+         answers on a Unix socket, and the Windows named pipe is still to come",
+        asked.direction.word(),
+        asked.command.join(" ")
+    )
+}
+
+#[cfg(not(unix))]
+fn close(asked: ClosePane, json: bool) -> Result<String> {
+    let flag = if json { " --json" } else { "" };
+    bail!(
+        "`crook pane close {}{flag}` is not available on this platform yet: a window answers on \
+         a Unix socket, and the Windows named pipe is still to come",
+        asked.pane
+    )
+}
+
+#[cfg(not(unix))]
 fn followed(asked: Follow) -> Result<()> {
     let pane = asked
         .pane
@@ -412,6 +536,18 @@ fn blocks(asked: ReadBlocks, json: bool) -> Result<String> {
         json,
         std::env::home_dir().as_deref(),
     )
+}
+
+#[cfg(unix)]
+fn split(asked: SplitPane, json: bool) -> Result<Printed> {
+    let socket = unix::socket_here()?;
+    unix::split_pane(&socket, unix::token_here().as_deref(), asked, json)
+}
+
+#[cfg(unix)]
+fn close(asked: ClosePane, json: bool) -> Result<String> {
+    let socket = unix::socket_here()?;
+    unix::close_pane(&socket, unix::token_here().as_deref(), asked, json)
 }
 
 #[cfg(unix)]
@@ -654,7 +790,8 @@ pub mod unix {
     use serde_json::Value;
 
     use super::super::protocol::{
-        self, BlocksRead, Follow, NewTab, Opened, PaneEntry, ReadBlocks, Reply, Verb, Wait, Waited,
+        self, BlocksRead, ClosePane, Follow, NewTab, Opened, PaneEntry, ReadBlocks, Refusal, Reply,
+        SplitPane, Verb, Wait, Waited,
     };
     use super::super::{SOCKET_VARIABLE, TOKEN_VARIABLE, server};
     use super::{Printed, table};
@@ -817,6 +954,39 @@ pub mod unix {
             failure: None,
             note: opened.note.as_deref().map(super::printable),
         })
+    }
+
+    /// What `crook pane split` prints, having asked the window at `socket` to
+    /// split `asked` off a pane: the new pane's number, as `crook tab new`
+    /// prints the new tab's, or the whole answer with `--json`.
+    pub fn split_pane(
+        socket: &Path,
+        token: Option<&str>,
+        asked: SplitPane,
+        json: bool,
+    ) -> Result<Printed> {
+        let result = ask(socket, &Verb::PaneSplit(asked), token)?;
+        if json {
+            return Ok(Printed::from(super::json(&result)));
+        }
+        let opened: Opened = serde_json::from_value(result)
+            .context("the window's answer is not the pane it opened")?;
+        Ok(Printed::from(opened.pane_id.to_string()))
+    }
+
+    /// What `crook pane close` prints, having asked the window at `socket`
+    /// to close a pane: `closed`, or the whole answer with `--json`.
+    pub fn close_pane(
+        socket: &Path,
+        token: Option<&str>,
+        asked: ClosePane,
+        json: bool,
+    ) -> Result<String> {
+        let result = ask(socket, &Verb::PaneClose(asked), token)?;
+        if json {
+            return Ok(super::json(&result));
+        }
+        Ok("closed".to_owned())
     }
 
     /// What `crook pane wait` prints, having asked the window at `socket` to
@@ -1061,6 +1231,18 @@ pub mod unix {
 
     /// Reads one reply, and hands back its answer or says its refusal.
     fn answer(replies: &mut impl BufRead) -> Result<Value> {
+        read_reply(replies)?.map_err(|refusal| anyhow!("{} ({})", refusal.message, refusal.code))
+    }
+
+    /// Asks the window at `socket` one verb, and hands back its answer.
+    fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
+        let stream = connect_checked(socket)?;
+        request(&stream, verb, token)?;
+        answer(&mut BufReader::new(&stream))
+    }
+
+    /// Reads one reply: the answer or the refusal, as the window said it.
+    pub fn read_reply(replies: &mut impl BufRead) -> Result<Result<Value, Refusal>> {
         let mut line = Vec::new();
         replies
             .take(MAX_REPLY)
@@ -1072,16 +1254,9 @@ pub mod unix {
         let reply: Reply =
             serde_json::from_slice(&line).context("what came back is not a window's reply")?;
         match (reply.result, reply.error) {
-            (Some(result), None) if reply.ok => Ok(result),
-            (_, Some(refusal)) => bail!("{} ({})", refusal.message, refusal.code),
+            (Some(result), None) if reply.ok => Ok(Ok(result)),
+            (_, Some(refusal)) => Ok(Err(refusal)),
             _ => bail!("the window's reply carries neither an answer nor a refusal"),
         }
-    }
-
-    /// Asks the window at `socket` one verb, and hands back its answer.
-    fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
-        let stream = connect_checked(socket)?;
-        request(&stream, verb, token)?;
-        answer(&mut BufReader::new(&stream))
     }
 }

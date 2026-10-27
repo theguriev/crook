@@ -10,9 +10,10 @@
 //! `pane.list`, which only reads; `tab.new`, which opens a tab beside the pane
 //! that asked and runs a command in it; `pane.wait`, `pane.blocks` and
 //! `events.follow`, which watch the panes the asker may watch — itself, and
-//! the tabs it opened; and `agent.ask`, which an agent's permission hook
-//! hands its question to and waits on, and which no verb answers — see
-//! [`ask`]. "The window answers" in `docs/architecture.md` is the whole
+//! the tabs it opened; `pane.split` and `pane.close`, which split a pane
+//! off the asker's or close one it opened; and `agent.ask`, which an
+//! agent's permission hook hands its question to and waits on, and which no
+//! verb answers — see [`ask`]. "The window answers" in `docs/architecture.md` is the whole
 //! argument: the threat model, the protocol, and what the verbs after these
 //! will need; "Answering an agent" is the question's.
 //!
@@ -36,12 +37,15 @@
 //!   probe, the listener thread and one short-lived thread per connection.
 //! * [`cli`] is `crook pane …`, `crook tab new` and `crook events`, the
 //!   other end.
-//! * [`spawn`] is the window's side of `tab.new`: the token, the budget, the
-//!   worktree, and the command typed at the new pane's first prompt.
+//! * [`spawn`] is the window's side of `tab.new` and `pane.split`: the token,
+//!   the budget, the worktree, and the command typed at the new pane's first
+//!   prompt.
 //! * [`watch`] is the window's side of `pane.wait` and `events.follow`: who
 //!   may watch which pane, and the bounded feeds a kept connection waits on.
 //! * [`blocks`] is the window's side of `pane.blocks`: a pane's finished
 //!   commands and what they printed, capped.
+//! * [`close`] is the window's side of `pane.close`: which panes a caller
+//!   may close, and that none of them is working.
 //! * [`ask`] is the window's side of `agent.ask`: the questions agents'
 //!   hooks are waiting on, which pane each is in, and how each ended.
 //! * This file is the window's side of the rest: the [`Inbox`] a connection
@@ -74,6 +78,7 @@
 pub mod ask;
 pub mod blocks;
 pub mod cli;
+pub mod close;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;
@@ -479,6 +484,10 @@ fn answer(
             ));
         }
         Verb::PaneFind(asked) => answer.send(Ok(ask::find(workspace, &asked, ctx))),
+        Verb::PaneSplit(asked) => {
+            spawn::split(workspace, asked, token, spawns, answer, ctx);
+        }
+        Verb::PaneClose(asked) => answer.send(close::close(workspace, &asked, token, ctx)),
     }
 }
 

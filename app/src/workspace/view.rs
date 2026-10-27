@@ -11491,6 +11491,49 @@ impl Workspace {
         opened.map(|(tab, pane, _)| (tab, pane))
     }
 
+    /// Splits a pane off `beside` for `crook pane split`, on `direction`'s
+    /// side, and answers the tab and the new pane.
+    ///
+    /// Never focused, as a tab `crook tab new` opens is never selected: see
+    /// [`TabStrip::split_beside`]. `directory`, when there is one, is where
+    /// its shell starts in place of `beside`'s, and `prepare` writes the
+    /// lineage and the title before the shells are synced, as for
+    /// [`Self::open_worker_tab`].
+    pub(crate) fn open_worker_split(
+        &mut self,
+        beside: PaneId,
+        direction: Direction,
+        directory: Option<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+        prepare: impl FnOnce(&mut AgentSession),
+    ) -> Option<(TabId, PaneId)> {
+        let before = self.tabs.focused_pane_id();
+        let pane = self.tabs.split_beside(beside, direction)?;
+        if let Some(session) = self.tabs.pane_mut(pane).map(Pane::session_mut) {
+            if let Some(directory) = directory {
+                session.working_directory = Some(directory);
+            }
+            prepare(session);
+        }
+        let tab = self.tabs.tab_of(pane);
+        self.settle(TabEffect::Changed, before, ctx);
+        tab.map(|tab| (tab, pane))
+    }
+
+    /// Closes `pane` for `crook pane close`, with no question, and says
+    /// whether it went: the caller checked nothing in it is working, which
+    /// is when a close asks none. See `control::close`.
+    pub(crate) fn close_worker_pane(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+        // Never the window's last pane: the caller's own is open beside it,
+        // and a close that would quit is not one a script may ask for.
+        if self.tabs.panes().count() < 2 || self.tabs.pane(pane).is_none() {
+            return false;
+        }
+        let effect = self.apply(TabAction::ClosePane(pane), ctx);
+        debug_assert_ne!(effect, TabEffect::CloseWindow);
+        self.tabs.pane(pane).is_none()
+    }
+
     /// Types `line` into a pane's field, and runs it at the pane's first
     /// prompt.
     ///

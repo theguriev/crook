@@ -2462,6 +2462,27 @@ a hook's report, the title's glyph, and the end of a command taking either back 
 `settle`, which every road a pane opens or closes by goes through: no poll, no timer, and
 nothing done at all while nobody watches.
 
+**`pane.split`** opens a pane rather than a tab: split off the caller's own pane, or off one it
+may watch (`beside`), `right` or `down`, by the rule a person's split keys follow, and never
+focused — the anchor's group grows a pane beside it and the focus, the zoom and the active tab
+stay where they were (`TabStrip::split_beside`, which is not a `TabAction`, since no key, click
+or menu opens a pane nobody is moved to). It is `tab.new` in every other way: the token, the
+command words quoted for the new shell and typed at its first prompt, a `title`, a `cwd`, the
+lineage, the same eight panes on behalf of the pane a person opened, and the same run of
+refusals. A split has no `worktree`: it shares its tab with the pane it is split off. Both verbs
+take a `cwd`, an absolute path the window takes as given — a look at the disk is not made
+between two frames, and a directory that has gone is one a shell falls back from as a restored
+pane's does — which the CLI checks is a directory before asking.
+
+**`pane.close`** closes a pane the caller may watch, less its own, and its tab with it when it
+was the tab's last pane: what a lead does with a worker whose answer it has read. Refused as
+`own-pane` for the caller's own pane, which ends by its shell exiting; as `not-opened` for a
+pane a person or another agent opened; as `working` while anything in the pane is working —
+`AgentSession::is_working`, which is the close question's own rule, or a question its agent's
+hook is waiting on — and as `focused` for the pane a person is in. A close that would end work
+is one Crook asks a person about, and a request is never that person: the verb never puts the
+question up, and what it closes is only ever what would close with no question at all.
+
 **Kept connections.** A wait with time to wait, and a stream, keep their connection, and neither
 fits a five-second deadline or one of the eight places a question is answered in: a lead
 waiting on each of its eight workers would leave its own `pane list` refused as `busy`. Such a
@@ -2509,6 +2530,8 @@ owner-only named pipe with `PIPE_REJECT_REMOTE_CLIENTS` is the route when it com
 or `{"v":1,"verb":"pane.wait","token":"…","args":{"pane":7,"until":"needs-input","timeout":600}}`,
 `{"v":1,"verb":"pane.blocks","token":"…","args":{"pane":7,"last":1}}`,
 `{"v":1,"verb":"events.follow","token":"…","args":{"pane":7}}`,
+`{"v":1,"verb":"pane.split","token":"…","args":{"command":["make"],"direction":"down","beside":7}}`,
+`{"v":1,"verb":"pane.close","token":"…","args":{"pane":7}}`,
 with an optional `id` of any JSON value the reply echoes and an optional `min_version`. An
 argument a verb does not take is refused as `bad-request` rather than ignored, since ignoring a
 misspelt `worktree` would open an agent in the caller's own checkout. A reply is
@@ -2521,7 +2544,7 @@ than handed a half-understood answer. A verb is a promise that is hard to take b
 version verbs and fields are only ever added, and a field that changes meaning is a new version.
 The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout`, `gone`,
 `unauthorized`, `budget`, `too-many-refusals`, `unsupported-shell`, `failed`, `no-such-pane`,
-`needs-grant`, `no-blocks` and `declined`. An `events.follow` stream's lines after the first reply
+`needs-grant`, `no-blocks`, `declined`, `own-pane`, `not-opened`, `working` and `focused`. An `events.follow` stream's lines after the first reply
 are events, `{"event":"status","pane_id":7,"status":"needs-input","message":"…"}`, not replies.
 
 **The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
@@ -2562,6 +2585,8 @@ would replay a pane's escape sequence into the terminal the listing runs in; the
 every control character out as its escape, and `--json` escapes the DEL and C1 characters a JSON
 encoder leaves as they are. A block's output printed as text keeps its newlines and writes out
 every other control character the same way, and an event line is escaped as `--json` is.
+`crook pane split [--right|--down] [--beside ID] [--title T] [--cwd DIR] [--json] -- CMD…` prints
+the new pane's number as `tab new` does, and `crook pane close <ID> [--json]` prints `closed`.
 
 ### Answering an agent
 

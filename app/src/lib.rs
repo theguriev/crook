@@ -1691,7 +1691,9 @@ USAGE:
     crook pane list [--json]
     crook pane wait <ID> --until <STATE> [--timeout <SECS>] [--json]
     crook pane blocks <ID> [--last <N>] [--json]
-    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>...
+    crook pane split [--right|--down] [--beside <ID>] [--title <TITLE>] [--cwd <DIR>] [--json] -- <COMMAND>...
+    crook pane close <ID> [--json]
+    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--cwd <DIR>] [--json] -- <COMMAND>...
     crook events --follow [--pane <ID>]
 
 COMMANDS:
@@ -1722,6 +1724,22 @@ COMMANDS:
                        than printing nothing. --json prints the window's
                        answer. Your own pane and the tabs it opened; not on
                        Windows yet
+    pane split [...] -- <COMMAND>...
+                       From inside a pane, split a new pane off it — or off a
+                       tab or pane it opened, with --beside — to the right
+                       (the default) or --down, without moving the focus, and
+                       run the command there as `tab new` does. --cwd is where
+                       its shell starts; --title names it. Prints the new
+                       pane's number, or with --json the window's answer.
+                       Counts toward the same eight as `tab new`; not on
+                       Windows yet
+    pane close <ID>    Close pane ID, which this pane opened with `tab new` or
+                       `pane split` (and its tab, when it was the tab's last
+                       pane). Never this pane, and never one a person or
+                       another agent opened; refused while anything in it is
+                       working or a person is in it, since Crook asks before
+                       a close ends work and a command is never the one asked.
+                       Not on Windows yet
     tab new [...] -- <COMMAND>...
                        From inside a pane, open a tab beside it in the same
                        window, without switching to it, and run the command
@@ -1729,7 +1747,7 @@ COMMANDS:
                        as itself. --worktree makes a worktree on a new branch
                        from this pane's HEAD and opens the tab in it;
                        --in-my-group puts the tab in this tab's group; --title
-                       names it. Prints the new pane's number, or with --json
+                       names it; --cwd starts it in another directory. Prints the new pane's number, or with --json
                        the window's answer. The pane is known by the secret in
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
                        one pane a person opened. No word may hold a newline or

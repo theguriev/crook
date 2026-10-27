@@ -605,6 +605,11 @@ Twenty-two features, and the page that configures them:
   Crook cannot ask for yet. A command still running has not finished, and an interactive agent
   is one live screen with no finished command to read: `pane blocks` says so rather than
   printing nothing, and a worker whose answer is meant to be read runs headless, `claude -p`.
+  **And split beside itself, and close what it opened.** `crook pane split --down -- npm run
+  dev` opens a pane under the caller's own, or `--beside` one it opened, without moving the
+  focus, counted in the same eight; `crook pane close 7` closes a pane it opened once nothing in
+  it is working and you are not in it, and never its own, yours or another agent's. `tab new`
+  and `pane split` take `--cwd`.
   Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
   asking for a look, with the notification's text on the row and the status left as it was, so
   an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`

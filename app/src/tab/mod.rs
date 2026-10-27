@@ -1765,6 +1765,25 @@ impl TabStrip {
             .map(Tab::id)
     }
 
+    /// Splits a new pane off `anchor` on `direction`'s side, starting where
+    /// `anchor` is working, and leaves the focus and the active tab as they
+    /// are: what `crook pane split` opens. See [`PaneGroup::split_beside`].
+    ///
+    /// Not a [`TabAction`]: no key, click or menu opens a pane nobody is
+    /// moved to, and every action is one of those. `None` when `anchor` is
+    /// not open.
+    pub(crate) fn split_beside(&mut self, anchor: PaneId, direction: Direction) -> Option<PaneId> {
+        let directory = self.pane_directory(anchor);
+        let title = format!("agent {}", self.opened + 1);
+        let tab = self.tab_holding_mut(anchor)?;
+        let pane = tab.panes_mut().split_beside(anchor, direction, title)?;
+        if let (Some(directory), Some(opened)) = (directory, tab.panes_mut().get_mut(pane)) {
+            opened.session_mut().working_directory = Some(directory);
+        }
+        self.opened += 1;
+        Some(pane)
+    }
+
     /// The one pane a person is working in: the active tab's focused one.
     pub fn focused_pane_id(&self) -> Option<PaneId> {
         self.active().map(|tab| tab.panes().focused_id())

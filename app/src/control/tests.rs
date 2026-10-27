@@ -141,7 +141,9 @@ fn a_verb_this_window_does_not_know_is_refused_by_name() {
             "pane.blocks",
             "events.follow",
             "agent.ask",
-            "pane.find"
+            "pane.find",
+            "pane.split",
+            "pane.close"
         ]
     );
     for name in Verb::NAMES {
@@ -219,7 +221,10 @@ fn crook_pane_takes_list_and_json_and_refuses_anything_else() {
     );
     for (words, said) in [
         (&[][..], "needs a verb"),
-        (&["lsit"][..], "takes list, wait or blocks, not lsit"),
+        (
+            &["lsit"][..],
+            "takes list, wait, blocks, split or close, not lsit",
+        ),
         (&["list", "--json", "--json"][..], "given twice"),
         (&["list", "--tsv"][..], "unrecognised argument --tsv"),
     ] {
@@ -243,6 +248,7 @@ fn a_new_tab_request_carries_its_command_words_and_the_panes_token_off_the_wire(
         worktree: Some("fix-x".to_owned()),
         in_my_group: true,
         title: Some("fix x".to_owned()),
+        cwd: Some("/home/someone/work".to_owned()),
     };
     let line = protocol::request_line(&Verb::TabNew(asked.clone()), Some("5ec2e7"));
     assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
@@ -342,6 +348,7 @@ fn crook_tab_new_takes_its_flags_before_the_separator_and_the_command_after_it()
                 worktree: Some("fix-x".into()),
                 in_my_group: true,
                 title: Some("fix x".into()),
+                cwd: None,
             },
             true
         ))
@@ -1075,6 +1082,137 @@ fn crook_pane_wait_and_blocks_take_a_pane_and_their_flags_and_refuse_anything_el
         let refusal = arguments(words).expect_err("refused");
         assert!(refusal.contains(said), "{words:?}: {refusal}");
     }
+}
+
+#[test]
+fn a_split_and_a_close_come_back_off_the_wire_as_they_went_on_and_take_nothing_more() {
+    let split = protocol::SplitPane {
+        command: vec!["make".to_owned(), "test".to_owned()],
+        direction: protocol::SplitSide::Down,
+        beside: Some(7),
+        title: Some("tests".to_owned()),
+        cwd: Some("/w".to_owned()),
+    };
+    let close = protocol::ClosePane { pane: 7 };
+    for verb in [Verb::PaneSplit(split), Verb::PaneClose(close)] {
+        let line = protocol::request_line(&verb, Some("5ec2e7"));
+        let (_, request) = protocol::read(line.trim_end().as_bytes());
+        let request = request.expect("reads back");
+        assert_eq!(request.verb, verb);
+        assert_eq!(request.token.as_deref(), Some("5ec2e7"));
+        assert!(
+            !verb.keeps_connection(),
+            "{verb:?} is a question like any other"
+        );
+    }
+    // The defaults: to the right of the caller's own pane.
+    assert_eq!(
+        verdict(r#"{"v":1,"verb":"pane.split","args":{"command":["x"]}}"#).1,
+        Ok(Verb::PaneSplit(protocol::SplitPane {
+            command: vec!["x".to_owned()],
+            ..protocol::SplitPane::default()
+        }))
+    );
+    for line in [
+        r#"{"v":1,"verb":"pane.split"}"#,
+        r#"{"v":1,"verb":"pane.split","args":{"command":["x"],"direction":"left"}}"#,
+        r#"{"v":1,"verb":"pane.split","args":{"command":["x"],"worktree":"b"}}"#,
+        r#"{"v":1,"verb":"pane.split","args":{"command":["x"],"keys":"y\n"}}"#,
+        r#"{"v":1,"verb":"pane.close"}"#,
+        r#"{"v":1,"verb":"pane.close","args":{"pane":"7"}}"#,
+        r#"{"v":1,"verb":"pane.close","args":{"pane":7,"force":true}}"#,
+    ] {
+        assert_eq!(verdict(line).1, Err(code::BAD_REQUEST.to_owned()), "{line}");
+    }
+    // Still nothing that types into a pane, nor that answers.
+    for name in [
+        "pane.send",
+        "pane.type",
+        "pane.input",
+        "agent.answer",
+        "agent.allow",
+    ] {
+        let line = format!(r#"{{"v":1,"verb":"{name}","args":{{}}}}"#);
+        assert_eq!(
+            verdict(&line).1,
+            Err(code::UNKNOWN_VERB.to_owned()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn crook_pane_split_and_close_take_their_flags_and_refuse_anything_else() {
+    let arguments = |words: &[&str]| {
+        cli::pane_arguments(words.iter().map(|word| (*word).to_owned()))
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        arguments(&[
+            "split", "--down", "--beside", "4", "--title", "t", "--cwd", "/w", "--json", "--",
+            "make", "--json"
+        ]),
+        Ok(cli::PaneCommand::Split {
+            asked: protocol::SplitPane {
+                command: vec!["make".to_owned(), "--json".to_owned()],
+                direction: protocol::SplitSide::Down,
+                beside: Some(4),
+                title: Some("t".to_owned()),
+                cwd: Some("/w".to_owned()),
+            },
+            json: true,
+        })
+    );
+    assert_eq!(
+        arguments(&["split", "--", "make"]),
+        Ok(cli::PaneCommand::Split {
+            asked: protocol::SplitPane {
+                command: vec!["make".to_owned()],
+                ..protocol::SplitPane::default()
+            },
+            json: false,
+        })
+    );
+    assert_eq!(
+        arguments(&["close", "7", "--json"]),
+        Ok(cli::PaneCommand::Close {
+            asked: protocol::ClosePane { pane: 7 },
+            json: true,
+        })
+    );
+    for (words, said) in [
+        (&["split"][..], "needs a command after `--`"),
+        (&["split", "--"][..], "needs a command after `--`"),
+        (&["split", "make"][..], "the command goes after `--`"),
+        (
+            &["split", "--right", "--down", "--", "x"][..],
+            "one of --right and --down",
+        ),
+        (
+            &["split", "--beside", "x", "--", "y"][..],
+            "a pane is its number",
+        ),
+        (
+            &["split", "--title", "a", "--title", "b", "--", "y"][..],
+            "given twice",
+        ),
+        (&["close"][..], "needs a pane"),
+        (&["close", "1", "2"][..], "one pane at a time"),
+        (
+            &["close", "--force", "1"][..],
+            "unrecognised argument --force",
+        ),
+    ] {
+        let refusal = arguments(words).expect_err("refused");
+        assert!(refusal.contains(said), "{words:?}: {refusal}");
+    }
+    let tab = cli::tab_arguments(
+        ["new", "--cwd", "/w", "--", "make"]
+            .iter()
+            .map(|word| (*word).to_owned()),
+    )
+    .expect("parses");
+    assert_eq!(tab.0.cwd.as_deref(), Some("/w"));
 }
 
 #[test]
@@ -8110,5 +8248,92 @@ mod socket {
         });
         let after = listed(&mut served);
         assert_eq!(keys(&entry(&after, asking)), quiet, "{after:?}");
+    }
+
+    #[test]
+    fn a_tab_or_a_split_starts_in_the_directory_asked_for_and_only_an_absolute_one() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        let directory = served._root.0.to_string_lossy().into_owned();
+        let opened = served
+            .open_tab(
+                Some(token.clone()),
+                NewTab {
+                    command: vec!["make".to_owned()],
+                    cwd: Some(directory.clone()),
+                    ..NewTab::default()
+                },
+            )
+            .expect("opens");
+        assert_eq!(opened.cwd.as_deref(), Some(directory.as_str()));
+        let worker = served.pane(opened.pane_id);
+        assert_eq!(
+            served.session(worker, |session| session.working_directory.clone()),
+            Some(PathBuf::from(&directory))
+        );
+        for (cwd, worktree, said) in [
+            ("relative/dir", None, "absolute path"),
+            ("/with\nnewline", None, "absolute path"),
+            ("/w", Some("b"), "not both"),
+        ] {
+            let refused = served
+                .open_tab(
+                    Some(token.clone()),
+                    NewTab {
+                        command: vec!["make".to_owned()],
+                        cwd: Some(cwd.to_owned()),
+                        worktree: worktree.map(str::to_owned),
+                        ..NewTab::default()
+                    },
+                )
+                .expect_err("refused");
+            assert!(refused.contains(said), "{cwd}: {refused}");
+        }
+        let token_for_split = token.clone();
+        let asked_directory = directory.clone();
+        let split = served
+            .ask(move |socket| {
+                cli::unix::split_pane(
+                    &socket,
+                    Some(&token_for_split),
+                    protocol::SplitPane {
+                        command: vec!["make".to_owned()],
+                        cwd: Some(asked_directory),
+                        ..protocol::SplitPane::default()
+                    },
+                    true,
+                )
+            })
+            .expect("splits");
+        let split: Opened = serde_json::from_str(&split.text).expect("JSON");
+        assert_eq!(split.cwd.as_deref(), Some(directory.as_str()));
+    }
+
+    #[test]
+    fn a_split_spends_the_budget_a_tab_does() {
+        let mut served = Served::new(|_, _, _| {});
+        let lead = first_pane(&served);
+        let token = served.token(lead);
+        for _ in 0..super::super::spawn::SPAWN_BUDGET {
+            let token = token.clone();
+            served
+                .ask(move |socket| {
+                    cli::unix::split_pane(
+                        &socket,
+                        Some(&token),
+                        protocol::SplitPane {
+                            command: vec!["true".to_owned()],
+                            ..protocol::SplitPane::default()
+                        },
+                        false,
+                    )
+                })
+                .expect("within the budget");
+        }
+        let refused = served
+            .open_tab(Some(token), new_tab(&["make"]))
+            .expect_err("past the budget");
+        assert!(refused.contains("budget"), "{refused}");
     }
 }
