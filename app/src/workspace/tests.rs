@@ -51289,13 +51289,17 @@ mod connecting_agents {
         wait_for_the_lists(&mut harness);
 
         let ended = press_and_wait(&mut harness, "crook/agents/connect", "claude");
-        assert_eq!(
-            ended,
-            Some(Outcome::Failed {
-                step: crate::agent::connect::Step::Connect,
-                title: "Connect Claude Code".into(),
-                exit: Some(1),
-            })
+        assert!(
+            matches!(
+                &ended,
+                Some(Outcome::Failed {
+                    step: crate::agent::connect::Step::Connect,
+                    title,
+                    exit: Some(1),
+                    ..
+                }) if title == "Connect Claude Code"
+            ),
+            "{ended:?}"
         );
         open_agents_page(&mut harness);
         let scene = harness.frame();
@@ -51409,7 +51413,8 @@ mod connecting_agents {
         (harness, pane)
     }
 
-    /// Two turns of the title, with the look for the agents let land between.
+    /// Two turns of the title, with the look for the agents let land between,
+    /// and the agent's list let answer after.
     fn at_work_a_while(harness: &mut Harness, pane: PaneId) {
         claude_at_work(harness, pane, 0);
         harness.wait_for("the agents were never looked for", |harness| {
@@ -51418,6 +51423,10 @@ mod connecting_agents {
             })
         });
         claude_at_work(harness, pane, 1);
+        harness.wait_for("the agent's list was never asked", |harness| {
+            looked(harness, "claude").is_some_and(|looked| looked != Looked::Asking)
+        });
+        harness.frame();
     }
 
     /// The same two turns where no look for the agents should come between
@@ -51522,9 +51531,92 @@ mod connecting_agents {
         assert_eq!(harness.tab_name(harness.active_id()), "Connect Claude Code");
         let typed = harness.field_text(harness.focused_pane_id().unwrap());
         assert!(
-            typed.starts_with("claude plugin marketplace add theguriev/crook; "),
+            typed.contains("claude plugin marketplace add theguriev/crook; "),
             "{typed:?}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_whose_list_has_the_plugin_is_told_why_and_offered_no_connect() {
+        // The plugin is there and the pane reports nothing: a session
+        // started before it was installed. Connect would install nothing.
+        let agents = Agents::new(&installed(env!("CARGO_PKG_VERSION")));
+        let (mut harness, pane) = hinted_window(&agents);
+        at_work_a_while(&mut harness, pane);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(
+            !says(&scene, HINT),
+            "offered Connect to a connected agent: {text}"
+        );
+        assert!(
+            says(&scene, "restart it to load the plugin in this session"),
+            "{text}"
+        );
+        assert!(agents.ran().is_empty(), "the hint ran more than the list");
+        harness.run_about("crook/agents/dismiss", "claude");
+        assert!(!says(
+            &harness.frame(),
+            "restart it to load the plugin in this session"
+        ));
+        assert!(
+            !harness.general().agents_not_connected.contains("claude"),
+            "Dismiss was kept as Not now"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_press_never_heard_to_end_gives_way_to_what_the_list_says_when_the_page_is_shown() {
+        // No shell has opened, so nothing marks the line's end: the page,
+        // opened again within the minute, asks again rather than showing the
+        // answer it had, and the list's answer stands in for the press.
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        harness.run_about("crook/agents/connect", "claude");
+        assert!(matches!(
+            outcome(&harness, "claude"),
+            Some(Outcome::Running { .. })
+        ));
+        fs::write(
+            agents.directory().join("listed"),
+            installed(env!("CARGO_PKG_VERSION")),
+        )
+        .unwrap();
+
+        open_agents_page(&mut harness);
+        harness.wait_for("the page did not ask again", |harness| {
+            matches!(
+                looked(harness, "claude"),
+                Some(Looked::Said(
+                    crate::agent::connect::Standing::Connected { .. }
+                ))
+            )
+        });
+        assert_eq!(outcome(&harness, "claude"), None);
+        let scene = harness.frame();
+        assert!(says(&scene, "Connected"), "{}", frame_text(&scene));
+        assert!(says(&scene, "Check again"), "{}", frame_text(&scene));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_again_asks_the_lists_at_once() {
+        let agents = Agents::new("[]");
+        let mut harness = window(&agents, agents.found_by_path());
+        open_agents_page(&mut harness);
+        wait_for_the_lists(&mut harness);
+        fs::write(agents.directory().join("listed"), installed("0.1.1")).unwrap();
+        harness.run_about("crook/agents/check", "");
+        harness.wait_for("Check again did not ask", |harness| {
+            matches!(
+                looked(harness, "claude"),
+                Some(Looked::Said(crate::agent::connect::Standing::Behind { .. }))
+            )
+        });
     }
 
     #[test]
@@ -51622,6 +51714,7 @@ mod connecting_agents {
             "crook/agents/update",
             "crook/agents/not-now",
             "crook/agents/check",
+            "crook/agents/dismiss",
             "crook/agents/open",
         ] {
             let name = ActionName::parse(name).expect("a literal");

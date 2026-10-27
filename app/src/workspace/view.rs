@@ -2019,47 +2019,44 @@ impl Workspace {
         }
         let search = self.agent_search();
         let config = self.connections.claude_config();
+        let home = self.agents_home();
         ctx.notify();
         let asking = ctx.background().spawn(async move {
-            use crate::agent::connect;
-            let found = connect::located(&search);
-            // Side by side: each is a program starting, a second or two
-            // apiece.
-            let said = std::thread::scope(|scope| {
-                let asked: Vec<_> = found
-                    .iter()
-                    .map(|located| {
-                        let file = located.file.clone();
-                        let agent = located.agent;
-                        let asking = scope.spawn(move || connect::look(&file, &[]));
-                        (agent, asking)
-                    })
-                    .collect();
-                asked
-                    .into_iter()
-                    .map(|(agent, asking)| {
-                        let looked = match asking.join() {
-                            Ok(Ok(listed)) => connecting::Looked::Said(connect::standing(
-                                &listed,
-                                env!("CARGO_PKG_VERSION"),
-                            )),
-                            Ok(Err(why)) => connecting::Looked::Unanswered(why),
-                            Err(_) => connecting::Looked::Unanswered(String::from(
-                                "the look at it stopped",
-                            )),
-                        };
-                        (agent, looked)
-                    })
-                    .collect::<Vec<_>>()
-            });
-            let updates = config.is_some_and(|config| connect::claude_updates_by_itself(&config));
+            let found = crate::agent::connect::located(&search);
+            let said = connecting::ask(&found, &home);
+            let updates = config
+                .is_some_and(|config| crate::agent::connect::claude_updates_by_itself(&config));
             (found, said, updates)
         });
         ctx.spawn(asking, |workspace, (found, said, updates), ctx| {
-            workspace.connections.looked(found, said, updates);
+            // A tab whose shell marks no commands never says its line ended:
+            // what the list says now stands in its place.
+            let unmarked = workspace.unmarked_runs(ctx);
+            workspace
+                .connections
+                .looked(found, said, updates, &unmarked);
             ctx.notify();
         })
         .detach();
+    }
+
+    /// The panes a Connect or an Update runs in whose shells report no
+    /// command marks, so never say that the line ended.
+    fn unmarked_runs(&self, app: &AppContext) -> Vec<PaneId> {
+        self.connections
+            .running_panes()
+            .into_iter()
+            .filter(|pane| self.shell_marks(*pane, app) != Some(true))
+            .collect()
+    }
+
+    /// Where the agents are asked and their commands run: home.
+    fn agents_home(&self) -> PathBuf {
+        self.home()
+            .map(Path::to_path_buf)
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// The Agents page was shown: its agents are asked what they have.
@@ -2072,7 +2069,11 @@ impl Workspace {
             .selected(&self.host)
             .and_then(|page| self.host.settings_page_key(page));
         if shown == Some(crate::plugins::agents::PAGE_KEY) {
-            self.look_at_agents(false, ctx);
+            // A press that has not been heard to end, or that failed, is
+            // asked about again whenever the page is looked at: the cached
+            // answer is what the row already says.
+            let unsettled = self.connections.has_unsettled_outcome();
+            self.look_at_agents(unsettled, ctx);
         }
     }
 
@@ -2113,20 +2114,15 @@ impl Workspace {
             return;
         };
         let shell = self.terminals.as_ref(ctx).shell();
+        let program = crate::agent::connect::typed_as(&located, shell.as_os_str());
         let Some(line) =
-            crate::agent::connect::line(located.agent, step, &located.typed, shell.as_os_str())
+            crate::agent::connect::line(located.agent, step, &program, shell.as_os_str())
         else {
             return;
         };
         // Home, which is where the agent's own commands mean what they say:
         // a project's directory could hold settings of its own.
-        let Some(directory) = self
-            .home()
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-        else {
-            return;
-        };
+        let directory = self.agents_home();
         let title = crate::agent::connect::tab_title(located.agent, step);
         // In front, as a file opened from the desktop is: the person is to
         // see what runs, and a settings page over the panes would hide it.
@@ -2161,13 +2157,25 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Dismiss on the hint for `agent`: down for this window, which offers
+    /// it once, and nothing kept.
+    pub(crate) fn dismiss_the_hint(&mut self, agent: &str, ctx: &mut ViewContext<Self>) {
+        if self.connections.withdraw(agent) {
+            ctx.notify();
+        }
+    }
+
     /// `pane`'s title says `agent` is at work: the hint goes up over it once
     /// it has said so for [`connecting::HINT_AFTER`] with no hook heard, the
     /// agent is installed here, and nothing more pressing is on screen.
     ///
-    /// `agent` is what the pane runs by its command line, so an agent over
-    /// `ssh` or through a wrapper is never hinted at: connecting this
-    /// machine's would not connect that one.
+    /// `agent` is what the pane runs by its command line, read through what
+    /// only runs it — `npx`, `env`, `mise x` — as [`crate::agent::program_of`]
+    /// reads it. Those copies keep their plugins where the local one does,
+    /// in `~/.claude` and its kin, so connecting the local agent connects
+    /// them too. An agent over `ssh` is a command line that names `ssh`, and
+    /// is never hinted at: connecting this machine's would not connect that
+    /// one.
     fn consider_the_hint(
         &mut self,
         pane: PaneId,
@@ -2193,14 +2201,71 @@ impl Workspace {
             self.find_agents(ctx);
             return;
         }
+        if self.connections.located(agent).is_none() || self.connections.is_running(agent) {
+            return;
+        }
+        // What the agent's list says decides what is offered, asked once,
+        // for this agent, the first time a hint is due: the page may never
+        // have been opened in this window.
+        match self.connections.looked_at(agent) {
+            None => self.look_for_the_hint(agent, pane, ctx),
+            Some(connecting::Looked::Asking) => {}
+            Some(_) => self.offer_the_hint(agent, pane, ctx),
+        }
+    }
+
+    /// Asks `agent`'s list, on the pool, what it has, and offers the hint
+    /// over `pane` once it answers.
+    fn look_for_the_hint(
+        &mut self,
+        agent: &'static str,
+        pane: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(located) = self.connections.located(agent).cloned() else {
+            return;
+        };
+        if !self.connections.start_looking_at(agent) {
+            return;
+        }
+        let home = self.agents_home();
+        let asking = ctx
+            .background()
+            .spawn(async move { connecting::ask(std::slice::from_ref(&located), &home) });
+        ctx.spawn(asking, move |workspace, said, ctx| {
+            for (agent, looked) in said {
+                workspace.connections.looked_one(agent, looked);
+            }
+            workspace.offer_the_hint(agent, pane, ctx);
+        })
+        .detach();
+    }
+
+    /// Puts the hint for `agent` up over `pane`, if its list says what it
+    /// should say and nothing has changed since it was due: see
+    /// [`Connections::hint_for`].
+    fn offer_the_hint(&mut self, agent: &'static str, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let general = self.general();
+        if !general.hint_to_connect_agents
+            || general.agents_not_connected.contains(agent)
+            || self.tabs.pane(pane).is_none()
+            || !self.asks.is_empty()
+            || self.ask_card.is_some()
+            || !self.connections.may_still_offer(agent, pane)
+        {
+            return;
+        }
         let answerable = self
             .host
             .action(&crate::plugins::agents::action("connect"))
             .is_some();
-        if !answerable || !self.connections.may_offer(agent) {
+        let Some(hint) = self.connections.hint_for(agent) else {
+            return;
+        };
+        if !answerable {
             return;
         }
-        self.connections.offer(agent, pane);
+        self.connections.offer(agent, pane, hint);
         ctx.notify();
     }
 

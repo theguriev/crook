@@ -20,10 +20,20 @@
 //! reports a prompt as it is submitted. So the header offers it once, under
 //! itself, the way it says a crash or a session another window keeps:
 //! Connect, or Not now. Only for an agent this machine has, found where a
-//! pane's shell finds it, and running in the pane by that name rather than
-//! through `ssh` or `npx`. Never while a question is waiting, and never
-//! again for an agent somebody said Not now to; the Agents page turns the
-//! hints off altogether. The hint takes no key and moves no focus.
+//! pane's shell finds it, and running in the pane — by its name or its
+//! path, or through `npx` or `mise x`, which keep their plugins where the
+//! local one does — rather than over `ssh`. Never while a question is
+//! waiting, and never again for an agent somebody said Not now to; the
+//! Agents page turns the hints off altogether. The hint takes no key and
+//! moves no focus.
+//!
+//! What it offers is what the agent's own list says, asked once for that
+//! agent when the hint is first due: Connect where the plugin is missing.
+//! Where the list says it is there and the pane still reports nothing, the
+//! plugin is not what is missing — a Claude Code session started before it
+//! was installed loads it only on a restart, and Codex runs none of its
+//! hooks until they are trusted — so the line says that instead, with no
+//! Connect. For any other agent, or a list that could not be read, nothing.
 
 use std::collections::{HashMap, HashSet};
 
@@ -73,12 +83,63 @@ pub(crate) enum Outcome {
     Running { step: Step, title: String },
     /// Its line ended with status 0.
     Done(Step),
-    /// Its line ended otherwise: the status, when the shell said one.
+    /// Its line ended otherwise: the status, when the shell said one, and
+    /// the pane it ran in, whose tab says why for as long as it is open.
     Failed {
         step: Step,
         title: String,
         exit: Option<i32>,
+        pane: PaneId,
     },
+}
+
+/// What the hint says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HintKind {
+    /// The agent's list says Crook's plugin is not installed: Connect, or
+    /// Not now.
+    Connect,
+    /// The list says it is, and the pane reports nothing all the same: why
+    /// that may be, and Dismiss.
+    Why(&'static str),
+}
+
+/// What the hint says over a Claude Code that has the plugin and reports
+/// nothing: hooks load as a session starts.
+pub(crate) const CLAUDE_RESTART: &str =
+    "Claude Code has Crook\u{2019}s plugin: restart it to load the plugin in this session";
+
+/// What it says over such a Codex: it runs no hook it has not been told to
+/// trust, a plugin's included.
+pub(crate) const CODEX_TRUST: &str =
+    "Codex holds Crook\u{2019}s plugin\u{2019}s hooks until you trust them, in its /hooks";
+
+/// Asks each of `found` what it has, side by side, in `home`: each one's
+/// own `plugin list --json`. On the pool.
+pub(crate) fn ask(found: &[Located], home: &std::path::Path) -> Vec<(&'static str, Looked)> {
+    use crate::agent::connect;
+    std::thread::scope(|scope| {
+        let asked: Vec<_> = found
+            .iter()
+            .map(|located| {
+                let asking = scope.spawn(move || connect::look(&located.file, home, &[]));
+                (located.agent, asking)
+            })
+            .collect();
+        asked
+            .into_iter()
+            .map(|(agent, asking)| {
+                let looked = match asking.join() {
+                    Ok(Ok(listed)) => {
+                        Looked::Said(connect::standing(&listed, env!("CARGO_PKG_VERSION")))
+                    }
+                    Ok(Err(why)) => Looked::Unanswered(why),
+                    Err(_) => Looked::Unanswered(String::from("the look at it stopped")),
+                };
+                (agent, looked)
+            })
+            .collect()
+    })
 }
 
 /// The hint, while it is up.
@@ -88,6 +149,8 @@ pub(crate) struct Hint {
     pub(crate) agent: &'static str,
     /// The pane whose title it was offered over.
     pub(crate) pane: PaneId,
+    /// What it says.
+    pub(crate) kind: HintKind,
     pub(crate) connect: MouseStateHandle,
     pub(crate) not_now: MouseStateHandle,
 }
@@ -196,6 +259,7 @@ impl Connections {
         found: Vec<Located>,
         said: Vec<(&'static str, Looked)>,
         claude_updates: bool,
+        unmarked: &[PaneId],
     ) {
         self.found = Some(found);
         self.finding = false;
@@ -203,11 +267,57 @@ impl Connections {
         self.looked.clear();
         self.looked.extend(said);
         self.claude_updates = claude_updates;
+        // A press in a tab whose shell marks no commands is never heard to
+        // end — cmd.exe, PowerShell, nushell, a startup file that execs tmux
+        // — so the list stands in for it: the row says what the agent has.
+        for pane in unmarked {
+            if let Some(run) = self.runs.remove(pane) {
+                self.outcomes.remove(run.agent);
+            }
+        }
         // A connection that ended is told by the list from here on, which
-        // says what it came to; a failure stays, since the list cannot say
-        // why.
+        // says what it came to. A failure stays, since the list cannot say
+        // why — unless the list says the plugin is there now, which a press
+        // since, or one in another window, or by hand, may have done.
+        let looked = &self.looked;
+        self.outcomes.retain(|agent, outcome| match outcome {
+            Outcome::Done(_) => false,
+            Outcome::Failed { .. } => !matches!(
+                looked.get(agent),
+                Some(Looked::Said(
+                    Standing::Connected { .. } | Standing::Behind { .. }
+                ))
+            ),
+            Outcome::Running { .. } => true,
+        });
+    }
+
+    /// Marks `agent` as being asked, alone, for the hint: whether it should
+    /// be, being neither asked already nor answered.
+    pub(crate) fn start_looking_at(&mut self, agent: &'static str) -> bool {
+        if self.held || self.looking || self.looked.contains_key(agent) {
+            return false;
+        }
+        self.looked.insert(agent, Looked::Asking);
+        true
+    }
+
+    /// What `agent`'s list said, asked alone.
+    pub(crate) fn looked_one(&mut self, agent: &'static str, looked: Looked) {
+        self.looked.insert(agent, looked);
+    }
+
+    /// The panes a press is running in.
+    pub(crate) fn running_panes(&self) -> Vec<PaneId> {
+        self.runs.keys().copied().collect()
+    }
+
+    /// Whether any press is running, or failed: what the page asks the lists
+    /// about again whenever it is shown.
+    pub(crate) fn has_unsettled_outcome(&self) -> bool {
         self.outcomes
-            .retain(|_, outcome| !matches!(outcome, Outcome::Done(_)));
+            .values()
+            .any(|outcome| matches!(outcome, Outcome::Running { .. } | Outcome::Failed { .. }))
     }
 
     /// What `agent`'s list said, if it has been asked.
@@ -284,6 +394,7 @@ impl Connections {
                 step: run.step,
                 title,
                 exit,
+                pane,
             },
         };
         self.outcomes.insert(run.agent, outcome);
@@ -353,26 +464,41 @@ impl Connections {
         self.hint_after = Some(after);
     }
 
-    /// Whether the hint may be offered for `agent`, by what the window knows
-    /// of it: installed here, and not known to be connected.
-    pub(crate) fn may_offer(&self, agent: &str) -> bool {
-        if self.located(agent).is_none() {
-            return false;
+    /// Whether the hint may still go up for `agent` over `pane`, now that
+    /// its list has answered: nothing has been offered for it, no hint is
+    /// up, the pane's hooks have not spoken since, and no press is running.
+    pub(crate) fn may_still_offer(&self, agent: &str, pane: PaneId) -> bool {
+        !self.held
+            && self.hint.is_none()
+            && !self.hinted.contains(agent)
+            && !self.heard.contains(&pane)
+            && self.located(agent).is_some()
+            && !self.is_running(agent)
+    }
+
+    /// What the hint says for `agent`, by what its list said: Connect where
+    /// the plugin is missing; why the pane says nothing where it is there,
+    /// for Claude Code and Codex; nothing otherwise, nor before the list has
+    /// answered.
+    pub(crate) fn hint_for(&self, agent: &str) -> Option<HintKind> {
+        match self.looked.get(agent)? {
+            Looked::Said(Standing::Missing) => Some(HintKind::Connect),
+            Looked::Said(Standing::Connected { .. } | Standing::Behind { .. }) => match agent {
+                "claude" => Some(HintKind::Why(CLAUDE_RESTART)),
+                "codex" => Some(HintKind::Why(CODEX_TRUST)),
+                _ => None,
+            },
+            _ => None,
         }
-        !matches!(
-            self.looked.get(agent),
-            Some(Looked::Said(
-                Standing::Connected { .. } | Standing::Behind { .. } | Standing::Off
-            )) | Some(Looked::Asking)
-        ) && !self.is_running(agent)
     }
 
     /// Puts the hint up for `agent`, over `pane`.
-    pub(crate) fn offer(&mut self, agent: &'static str, pane: PaneId) {
+    pub(crate) fn offer(&mut self, agent: &'static str, pane: PaneId, kind: HintKind) {
         self.hinted.insert(agent);
         self.hint = Some(Hint {
             agent,
             pane,
+            kind,
             connect: MouseStateHandle::default(),
             not_now: MouseStateHandle::default(),
         });
@@ -406,9 +532,12 @@ impl Connections {
         }
         // A press whose tab closed before its line finished came to nothing
         // anybody saw.
+        // And a failure whose tab closed has nothing left to say why.
         let running: HashSet<&str> = self.runs.values().map(|run| run.agent).collect();
-        self.outcomes.retain(|agent, outcome| {
-            !matches!(outcome, Outcome::Running { .. }) || running.contains(agent)
+        self.outcomes.retain(|agent, outcome| match outcome {
+            Outcome::Running { .. } => running.contains(agent),
+            Outcome::Failed { pane, .. } => open.contains(pane),
+            Outcome::Done(_) => true,
         });
     }
 
@@ -442,9 +571,11 @@ impl Connections {
         claude_updates: bool,
         hint: Option<(&'static str, PaneId)>,
     ) {
-        self.looked(found, said, claude_updates);
-        if let Some((agent, pane)) = hint {
-            self.offer(agent, pane);
+        self.looked(found, said, claude_updates, &[]);
+        if let Some((agent, pane)) = hint
+            && let Some(kind) = self.hint_for(agent)
+        {
+            self.offer(agent, pane, kind);
         }
         self.held = true;
     }
@@ -559,17 +690,34 @@ pub(super) fn render(workspace: &super::view::Workspace) -> Option<Box<dyn Eleme
 
     let hint = workspace.connect_hint()?;
     let program = crate::agent::program(hint.agent)?;
-    let connect = workspace.run_about(&action("connect"), hint.agent)?;
-    let not_now = workspace.run_about(&action("not-now"), hint.agent)?;
     let ui = workspace.fonts().ui;
-    Some(super::crash_note::line(
-        hint_text(hint.agent, program),
-        [
-            widgets::text_button("Connect", Some(connect), hint.connect.clone(), ui),
-            widgets::text_button("Not now", Some(not_now), hint.not_now.clone(), ui),
-        ],
-        ui,
-    ))
+    Some(match hint.kind {
+        HintKind::Connect => {
+            let connect = workspace.run_about(&action("connect"), hint.agent)?;
+            let not_now = workspace.run_about(&action("not-now"), hint.agent)?;
+            super::crash_note::line(
+                hint_text(hint.agent, program),
+                [
+                    widgets::text_button("Connect", Some(connect), hint.connect.clone(), ui),
+                    widgets::text_button("Not now", Some(not_now), hint.not_now.clone(), ui),
+                ],
+                ui,
+            )
+        }
+        HintKind::Why(said) => {
+            let dismiss = workspace.run_about(&action("dismiss"), hint.agent)?;
+            super::crash_note::line(
+                said,
+                [widgets::text_button(
+                    "Dismiss",
+                    Some(dismiss),
+                    hint.not_now.clone(),
+                    ui,
+                )],
+                ui,
+            )
+        }
+    })
 }
 
 /// What the hint says for `agent`, which calls itself `program`.
@@ -607,28 +755,80 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_is_offered_once_an_agent_and_only_for_one_found_here() {
+    fn what_the_hint_offers_is_what_the_agents_list_said() {
         let mut connections = Connections::default();
-        assert!(!connections.may_offer("claude"), "nothing was found");
-        connections.found_them(vec![claude()]);
-        assert!(connections.may_offer("claude"));
-        assert!(!connections.may_offer("codex"), "not installed here");
-
         let pane = PaneId::next();
-        connections.offer("claude", pane);
-        assert!(connections.withdraw("claude"));
-        let other = PaneId::next();
-        let start = Instant::now();
-        connections.at_work(other, "claude", start);
+        connections.found_them(vec![claude()]);
+        assert_eq!(
+            connections.hint_for("claude"),
+            None,
+            "before the list answered"
+        );
+        assert!(connections.may_still_offer("claude", pane));
         assert!(
-            !connections.at_work(other, "claude", start + HINT_AFTER),
+            !connections.may_still_offer("codex", pane),
+            "not installed here"
+        );
+
+        connections.looked_one("claude", Looked::Said(Standing::Missing));
+        assert_eq!(connections.hint_for("claude"), Some(HintKind::Connect));
+        connections.looked_one(
+            "claude",
+            Looked::Said(Standing::Connected { version: None }),
+        );
+        assert_eq!(
+            connections.hint_for("claude"),
+            Some(HintKind::Why(CLAUDE_RESTART))
+        );
+        connections.looked_one("codex", Looked::Said(Standing::Connected { version: None }));
+        assert_eq!(
+            connections.hint_for("codex"),
+            Some(HintKind::Why(CODEX_TRUST))
+        );
+        connections.looked_one(
+            "copilot",
+            Looked::Said(Standing::Connected { version: None }),
+        );
+        assert_eq!(connections.hint_for("copilot"), None);
+        connections.looked_one("claude", Looked::Unanswered("no".into()));
+        assert_eq!(connections.hint_for("claude"), None);
+
+        connections.offer("claude", pane, HintKind::Connect);
+        assert!(connections.withdraw("claude"));
+        assert!(
+            !connections.may_still_offer("claude", PaneId::next()),
             "offered again for the same agent"
         );
     }
 
     #[test]
-    fn an_agent_whose_list_says_it_has_the_plugin_is_not_hinted() {
+    fn a_failure_clears_once_the_list_says_the_plugin_is_there_or_its_tab_closes() {
+        let failed = |connections: &mut Connections, pane| {
+            connections.ran(
+                "claude",
+                Step::Connect,
+                TabId::next(),
+                pane,
+                "Connect".into(),
+            );
+            connections.sent(pane);
+            connections.finished(pane, Some(1));
+            assert!(matches!(
+                connections.outcome("claude"),
+                Some(Outcome::Failed { .. })
+            ));
+        };
         let mut connections = Connections::default();
+        let pane = PaneId::next();
+        failed(&mut connections, pane);
+        // A list that says it is still missing leaves the failure standing.
+        connections.looked(
+            vec![claude()],
+            vec![("claude", Looked::Said(Standing::Missing))],
+            false,
+            &[],
+        );
+        assert!(connections.outcome("claude").is_some());
         connections.looked(
             vec![claude()],
             vec![(
@@ -636,8 +836,35 @@ mod tests {
                 Looked::Said(Standing::Connected { version: None }),
             )],
             false,
+            &[],
         );
-        assert!(!connections.may_offer("claude"));
+        assert_eq!(connections.outcome("claude"), None);
+
+        let pane = PaneId::next();
+        failed(&mut connections, pane);
+        connections.keep_only(&[pane]);
+        assert!(connections.outcome("claude").is_some());
+        connections.keep_only(&[]);
+        assert_eq!(connections.outcome("claude"), None);
+    }
+
+    #[test]
+    fn a_run_in_a_shell_with_no_marks_gives_way_to_the_list() {
+        let mut connections = Connections::default();
+        let pane = PaneId::next();
+        connections.ran(
+            "claude",
+            Step::Connect,
+            TabId::next(),
+            pane,
+            "Connect".into(),
+        );
+        // A marked shell's run goes on waiting for its end.
+        connections.looked(vec![claude()], Vec::new(), false, &[]);
+        assert!(connections.is_running("claude"));
+        connections.looked(vec![claude()], Vec::new(), false, &[pane]);
+        assert!(!connections.is_running("claude"));
+        assert_eq!(connections.outcome("claude"), None);
     }
 
     #[test]
@@ -675,7 +902,8 @@ mod tests {
             Some(&Outcome::Failed {
                 step: Step::Connect,
                 title: "Connect Claude Code".into(),
-                exit: Some(1)
+                exit: Some(1),
+                pane,
             })
         );
         assert!(!connections.is_running("claude"));
