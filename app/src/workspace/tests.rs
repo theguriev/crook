@@ -20272,7 +20272,7 @@ mod shells {
         // On the row, a little above its baseline, as a pointer would be.
         harness.click(at + vec2f(4., -4.), MouseButton::Left);
 
-        assert_eq!(harness.field_text(pane), "git cherry-pick");
+        assert_eq!(harness.field_text(pane), "git cherry-pick ");
         let up = harness.workspace.read(&harness.app, |workspace, _| {
             workspace
                 .input(pane)

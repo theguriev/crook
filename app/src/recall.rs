@@ -128,10 +128,14 @@ impl Recall {
     }
 
     /// Remembers a command that ended, unless it is one not to remember.
-    pub fn remember(&mut self, record: Record) {
+    pub fn remember(&mut self, mut record: Record) {
         if record.command.trim().is_empty() || record.command.starts_with(char::is_whitespace) {
             return;
         }
+        // As the composer's own history does: the blank a completion left
+        // after the last word would otherwise make a second record of it.
+        let kept = crate::completion::without_trailing_blanks(&record.command).len();
+        record.command.truncate(kept);
         if let Some(path) = &self.file {
             append(path, &record);
         }

@@ -589,6 +589,21 @@ fn a_blank_line_is_not_recorded() {
 }
 
 #[test]
+fn the_blank_a_completion_left_at_the_end_is_not_part_of_the_entry() {
+    let mut editor = Editor::new();
+    for line in ["git status ", "git status", "touch trail\\ "] {
+        type_out(&mut editor, line);
+        editor.submit();
+    }
+
+    assert_eq!(
+        editor.history(),
+        ["git status", "touch trail\\ "],
+        "one entry for both, and an escaped blank is part of the name"
+    );
+}
+
+#[test]
 fn walking_up_the_history_reaches_the_oldest_entry_and_stops() {
     let mut editor = Editor::new();
     for line in ["one", "two", "three"] {

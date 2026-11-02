@@ -110,6 +110,10 @@ impl History {
         if line.trim().is_empty() {
             return;
         }
+        // The space a finished completion leaves after its word is not part
+        // of the command: kept, `git status ` and `git status` would be two
+        // entries, and the ghost suggestion would offer a stray blank.
+        let line = crate::completion::without_trailing_blanks(line);
         if let Some(at) = self.entries.iter().position(|entry| entry == line) {
             self.entries.remove(at);
         } else if self.entries.len() == CAPACITY {

@@ -441,7 +441,19 @@ impl TextInput {
         // one of the two.
         let line = self.line_to_caret();
         let word = completion::word_at_end(&line);
-        let offered = if answer.matching(word).len() > 1 {
+        let (count, exact) = {
+            let matching = answer.matching(word);
+            (
+                matching.len(),
+                matching.first().is_some_and(|&one| one == word),
+            )
+        };
+        // One candidate, and the word is it: the completion is finished, and
+        // what a shell's Tab types then is a space, so the next word can be
+        // typed straight away. Also when the word was already whole before the
+        // Tab — that Tab was asking whether anything is left, and nothing is.
+        let closed = count == 1 && exact && completion::closes_word(word) && self.close_word();
+        let offered = if count > 1 {
             Some(Offer {
                 // The word as it now stands, in the shell's case: a later
                 // keystroke extends this, not the mixed-case fragment that was
@@ -459,7 +471,7 @@ impl TextInput {
         // A frame is owed for the insertion as much as for the offer: a Tab
         // that typed the rest of a word and left nothing ambiguous has still
         // changed the line.
-        let changed = typed || offered.is_some() || completion.offered.is_some();
+        let changed = typed || closed || offered.is_some() || completion.offered.is_some();
         completion.offered = offered;
         changed
     }
@@ -644,7 +656,27 @@ impl TextInput {
             editor.set_selection(Selection::new(caret - word, caret));
             editor.insert(&candidate);
         });
+        if completion::closes_word(&candidate) {
+            self.close_word();
+        }
         self.forget_completions();
+        true
+    }
+
+    /// Types the space after a finished completion, unless the line already
+    /// has one right after the caret. Reports whether it typed one.
+    ///
+    /// A space already standing there — Tab on a word in the middle of a line
+    /// — is the one that would have been typed; a second would leave two.
+    fn close_word(&self) -> bool {
+        let follows = {
+            let editor = self.0.editor.borrow();
+            editor.text()[editor.caret()..].chars().next()
+        };
+        if follows.is_some_and(char::is_whitespace) {
+            return false;
+        }
+        self.edit(|editor| editor.insert(" "));
         true
     }
 
@@ -1104,7 +1136,57 @@ mod tests {
         // And a single case-mismatched candidate completes whole.
         let one = holding("read");
         answered(&one, &["README.md"]);
-        assert_eq!(one.editor().text(), "README.md");
+        assert_eq!(one.editor().text(), "README.md ");
+    }
+
+    #[test]
+    fn a_completion_that_leaves_nothing_to_choose_is_followed_by_a_space() {
+        // What every shell's Tab does with a single candidate: the word is
+        // done, so the next one can be typed straight away.
+        let input = holding("git chec");
+        answered(&input, &["checkout"]);
+        assert_eq!(input.editor().text(), "git checkout ");
+
+        // A word that was already whole asks whether anything is left, and
+        // the answer is the space.
+        let whole = holding("cargo build");
+        answered(&whole, &["build"]);
+        assert_eq!(whole.editor().text(), "cargo build ");
+    }
+
+    #[test]
+    fn a_name_that_asks_for_more_is_left_open() {
+        // A directory goes on into its files, an option into its value, a
+        // user into a host: a space there would have to be deleted again.
+        for (typed, candidate) in [
+            ("cd sr", "src/"),
+            ("git log --form", "--format="),
+            ("ssh gi", "git@"),
+            ("scp serv", "server:"),
+        ] {
+            let input = holding(typed);
+            answered(&input, &[candidate]);
+            let line = input.editor().text().to_owned();
+            assert!(line.ends_with(candidate), "{typed}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_tab_in_the_middle_of_a_line_does_not_double_the_space_after_it() {
+        let input = holding("git chec main");
+        input.edit(|editor| editor.set_selection(Selection::caret(8)));
+        answered(&input, &["checkout"]);
+        assert_eq!(input.editor().text(), "git checkout main");
+    }
+
+    #[test]
+    fn several_candidates_that_still_differ_get_no_space() {
+        // `cargo` is typed, but `cargo-fmt` is still a choice: a space would
+        // throw it away.
+        let input = holding("carg");
+        answered(&input, &["cargo", "cargo-fmt"]);
+        assert_eq!(input.editor().text(), "cargo");
+        assert!(input.has_offer());
     }
 
     #[test]
@@ -1216,7 +1298,7 @@ mod tests {
         answered(&input, &["cargo", "carbon"]);
 
         input.apply(Intent::Move(Motion::Right), &clipboard);
-        assert_eq!(input.editor().text(), "cargo");
+        assert_eq!(input.editor().text(), "cargo ");
         assert!(
             !input.cycle_completion(true),
             "the word is whole, and the rest of the answer was about half of it"
@@ -1235,11 +1317,11 @@ mod tests {
             None,
             "Enter with a list up chooses from it, the way every list's does"
         );
-        assert_eq!(input.editor().text(), "carbon");
+        assert_eq!(input.editor().text(), "carbon ");
         assert!(!input.has_offer(), "and the list has gone with the choice");
         assert_eq!(
             input.apply(Intent::Submit, &clipboard).as_deref(),
-            Some("carbon"),
+            Some("carbon "),
             "the next Enter runs it"
         );
     }
@@ -1305,7 +1387,7 @@ mod tests {
         assert!(input.accept_offer());
         assert_eq!(
             input.editor().text(),
-            "git checkout fix/card-pip-fallback",
+            "git checkout fix/card-pip-fallback ",
             "taken in place of the letters, not after them"
         );
     }
