@@ -3975,6 +3975,9 @@ mod tests {
         let scratch = ScratchDirectory::new("concurrent");
         const WINDOWS: usize = 8;
         const ROUNDS: usize = 6;
+        // How long a window goes on finding the lock busy before that is a
+        // failure: far past anything a lock that is ever let go of explains.
+        const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
         let start = std::sync::Arc::new(std::sync::Barrier::new(WINDOWS));
         let threads: Vec<_> = (0..WINDOWS)
             .map(|window| {
@@ -3992,11 +3995,33 @@ mod tests {
                             vec![format!("round-{round}")],
                         );
                         pending.then(settings.take_changes());
-                        let written = pending.clone();
-                        let applied =
-                            Settings::write_changes(&path, &written).expect("the save lands");
-                        assert!(!applied.set_aside(), "a window's own grant was set aside");
-                        pending.forget_written(&written, &applied);
+                        // A save that waited out `LOCK_PATIENCE` behind the
+                        // others is `LockBusy`, and a window keeps its change
+                        // and tries again — see the workspace's save. Eight
+                        // threads saving forty-eight times through one lock
+                        // can keep one waiting that long on a slow runner, and
+                        // a test that wanted every save to land first time was
+                        // a test of the runner's speed: Windows CI failed it.
+                        // What it is here to catch is a save that *lands* and
+                        // loses another's change, which the file below shows.
+                        let deadline = std::time::Instant::now() + BUSY_PATIENCE;
+                        loop {
+                            let written = pending.clone();
+                            match Settings::write_changes(&path, &written) {
+                                Ok(applied) => {
+                                    assert!(
+                                        !applied.set_aside(),
+                                        "a window's own grant was set aside"
+                                    );
+                                    pending.forget_written(&written, &applied);
+                                    break;
+                                }
+                                Err(error)
+                                    if error.downcast_ref::<LockBusy>().is_some()
+                                        && std::time::Instant::now() < deadline => {}
+                                Err(error) => panic!("the save did not land: {error:#}"),
+                            }
+                        }
                     }
                 })
             })
