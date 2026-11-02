@@ -176,6 +176,15 @@ pub enum Intent {
     /// `crook/window/clear-blocks` does to the pane under the field, and
     /// the line being written stays where it is, as it does in readline.
     ClearBlocks,
+    /// Put the commands run before up as a list over the line, filtered by
+    /// what it holds: Ctrl-R over a line with something in it.
+    ///
+    /// Over an empty line at a prompt the key is still the shell's — see
+    /// [`route`] — where it is readline's reverse search or fzf's history
+    /// widget, and somebody who set one up meant it. With a line in the field
+    /// the shell's own is empty, so its search could only start over; this
+    /// one starts from what is typed.
+    SearchHistory,
 }
 
 /// Where a keystroke goes.
@@ -441,6 +450,14 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
         None => {}
     }
     match intent(keystroke, chars, platform) {
+        // The shell's history search over an empty line at its prompt, as
+        // before there was one of the field's own: see
+        // [`Intent::SearchHistory`].
+        Some(Intent::SearchHistory)
+            if pane.line_is_empty && !pane.offer_standing && pane.at_prompt =>
+        {
+            Route::LineEditor
+        }
         Some(intent) => Route::Edit(intent),
         None if pane.line_is_empty
             && !pane.offer_standing
@@ -751,6 +768,7 @@ fn emacs_intent(key: &str) -> Option<Intent> {
         "e" => Some(Intent::Move(Motion::LineEnd)),
         "k" => Some(Intent::DeleteToLineEnd),
         "l" => Some(Intent::ClearBlocks),
+        "r" => Some(Intent::SearchHistory),
         "u" => Some(Intent::DeleteToLineStart),
         "w" => Some(Intent::DeleteWordLeft),
         _ => None,
@@ -1356,6 +1374,35 @@ mod tests {
         }
     }
 
+    /// Ctrl-R over a written line is the field's own history list; over an
+    /// empty one at a prompt it stays the shell's search, readline's or fzf's.
+    #[test]
+    fn control_r_lists_the_history_over_a_line_and_leaves_an_empty_one_to_the_shell() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("r", ctrl()), "\u{12}", composing(), platform),
+                Route::Edit(Intent::SearchHistory)
+            );
+            assert_eq!(
+                route(&keystroke("r", ctrl()), "\u{12}", empty(), platform),
+                Route::LineEditor
+            );
+            // An empty field with a list standing in it is somebody's question,
+            // and a shell not at its prompt has no search to hand it to: the
+            // field's list either way.
+            let offered = Pane {
+                offer_standing: true,
+                ..empty()
+            };
+            for pane in [offered, unmarked()] {
+                assert_eq!(
+                    route(&keystroke("r", ctrl()), "\u{12}", pane, platform),
+                    Route::Edit(Intent::SearchHistory)
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_key_that_produces_only_a_control_character_types_nothing() {
         // Escape produces text and has no cell to sit in. Neither has Tab,
@@ -1443,7 +1490,7 @@ mod tests {
         // started then would end with two lines and an Enter for one of them.
         for platform in [Platform::Mac, Platform::Other] {
             for (key, modifiers, chars) in [
-                ("r", ctrl(), ""),
+                ("s", ctrl(), ""),
                 ("t", ctrl(), ""),
                 ("escape", none(), "\u{1b}"),
             ] {
@@ -1469,7 +1516,7 @@ mod tests {
             ..empty()
         };
         for platform in [Platform::Mac, Platform::Other] {
-            for (key, modifiers, chars) in [("r", ctrl(), ""), ("escape", none(), "\u{1b}")] {
+            for (key, modifiers, chars) in [("s", ctrl(), ""), ("escape", none(), "\u{1b}")] {
                 assert_eq!(
                     route(&keystroke(key, modifiers), chars, offered, platform),
                     Route::Ignored,
@@ -1484,7 +1531,7 @@ mod tests {
         // No line editor is listening — or one is, and nothing will ever say
         // it has given the keyboard back.
         for platform in [Platform::Mac, Platform::Other] {
-            for (key, modifiers, chars) in [("r", ctrl(), ""), ("escape", none(), "\u{1b}")] {
+            for (key, modifiers, chars) in [("s", ctrl(), ""), ("escape", none(), "\u{1b}")] {
                 assert_eq!(
                     route(&keystroke(key, modifiers), chars, unmarked(), platform),
                     Route::Ignored,

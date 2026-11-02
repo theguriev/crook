@@ -229,8 +229,8 @@ impl Editor {
         text::offset_at_column(&self.text, start, column)
     }
 
-    /// The lines submitted this session, oldest first.
-    #[cfg(test)]
+    /// The lines submitted this session, after the shell's own history it
+    /// was seeded with, oldest first.
     pub fn history(&self) -> &[String] {
         self.history.entries()
     }

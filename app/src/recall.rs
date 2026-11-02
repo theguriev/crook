@@ -32,7 +32,8 @@
 //! counts against. Equal scores go to the newest, which keeps the rule a
 //! person can predict: the command they ran last, here, after this.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::completion::Completions;
 
 /// How many records are read back, newest kept.
 const LIMIT: usize = 5000;
@@ -195,6 +198,94 @@ impl Recall {
     }
 }
 
+/// The most commands the history list holds. Typing filters this many, not
+/// the whole file: past a thousand distinct commands the one wanted is found
+/// by typing more of it, and the oldest are the least likely to be it.
+pub const LISTED: usize = 1000;
+
+impl Recall {
+    /// Every command, once each, for the history list: the ones that fit
+    /// `context` first, as [`score`] has it, and the newest first among
+    /// equals; then the `plain` lines no record knows about, newest first.
+    ///
+    /// Each with a description of where and when it last ran — `here`, or the
+    /// directory with the home written `~`; how long ago; and that it failed,
+    /// when it did — since a list of bare commands cannot tell apart the
+    /// `make` run in this project from the one run in another.
+    pub fn listed(&self, plain: &[String], context: &Context, now: u64) -> Completions {
+        let home = dirs::home_dir();
+        let mut seen = HashSet::new();
+        let mut recorded: Vec<(i32, usize, &Record)> = self
+            .records
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, record)| seen.insert(record.command.as_str()))
+            .map(|(at, record)| (score(record, context), at, record))
+            .collect();
+        recorded.sort_by_key(|&(score, at, _)| (Reverse(score), Reverse(at)));
+
+        let mut answer = Completions {
+            ordered: true,
+            ..Completions::default()
+        };
+        for (_, _, record) in recorded {
+            answer.candidates.push(record.command.clone());
+            answer
+                .descriptions
+                .push(describe(record, context, home.as_deref(), now));
+        }
+        for line in plain.iter().rev() {
+            if seen.insert(line.as_str()) {
+                answer.candidates.push(line.clone());
+                answer.descriptions.push(String::new());
+            }
+        }
+        answer.truncated = answer.candidates.len() > LISTED;
+        answer.candidates.truncate(LISTED);
+        answer.descriptions.truncate(LISTED);
+        answer
+    }
+}
+
+/// Where and when `record` ran, and whether it failed, as the history list
+/// says it beside the command.
+fn describe(record: &Record, context: &Context, home: Option<&Path>, now: u64) -> String {
+    let mut parts = Vec::new();
+    match &record.directory {
+        Some(directory) if Some(directory) == context.directory.as_ref() => {
+            parts.push("here".to_owned());
+        }
+        Some(directory) => parts.push(
+            match home.and_then(|home| directory.strip_prefix(home).ok()) {
+                Some(inside) if inside.as_os_str().is_empty() => "~".to_owned(),
+                Some(inside) => format!("~/{}", inside.display()),
+                None => directory.display().to_string(),
+            },
+        ),
+        None => {}
+    }
+    if record.at != 0 {
+        parts.push(ago(now.saturating_sub(record.at)));
+    }
+    if let Some(exit) = record.exit.filter(|&exit| exit != 0) {
+        parts.push(format!("failed ({exit})"));
+    }
+    parts.join(" · ")
+}
+
+/// `seconds` as the one unit a person reads it in: `now`, `5m`, `3h`, `2d`,
+/// `6w`.
+fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        86_400..1_209_600 => format!("{}d", seconds / 86_400),
+        _ => format!("{}w", seconds / 604_800),
+    }
+}
+
 /// A record's place on the timeline after every plain line. Plain lines are
 /// at most the field's history, far fewer than this.
 fn plain_len_offset(at: usize) -> usize {
@@ -221,11 +312,28 @@ pub fn score(record: &Record, context: &Context) -> i32 {
     score
 }
 
+#[cfg(not(test))]
+static RECALL: OnceLock<Mutex<Recall>> = OnceLock::new();
+
+/// Makes the process's recall the records in `text`, one JSON object a line,
+/// held in memory: `--history-fixture`, for a picture of the history list
+/// that is the same on every machine and leaves the real file alone.
+///
+/// Before anything has asked for the recall, or not at all.
+#[cfg(not(test))]
+pub fn for_a_picture(text: &str) {
+    if RECALL
+        .set(Mutex::new(Recall::over(parse(text), None)))
+        .is_err()
+    {
+        log::warn!("the history was read before the fixture could stand in for it");
+    }
+}
+
 /// The process's recall, read from the data directory the first time it is
 /// asked for.
 #[cfg(not(test))]
 fn user() -> &'static Mutex<Recall> {
-    static RECALL: OnceLock<Mutex<Recall>> = OnceLock::new();
     RECALL.get_or_init(|| {
         let recall = dirs::data_dir()
             .map(|directory| directory.join("crook").join("history.jsonl"))
@@ -261,6 +369,12 @@ thread_local! {
 #[cfg(test)]
 pub fn with_user<T>(look: impl FnOnce(&Recall) -> T) -> T {
     RECALL.with(|recall| look(&recall.borrow()))
+}
+
+/// Makes this test thread's recall the records in `text`.
+#[cfg(test)]
+pub fn for_a_picture(text: &str) {
+    RECALL.with(|recall| *recall.borrow_mut() = Recall::over(parse(text), None));
 }
 
 /// Remembers `record` in this test thread's recall.

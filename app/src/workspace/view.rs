@@ -9414,6 +9414,29 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Types `line` into the focused composer and puts the history list up
+    /// over it, as Ctrl-R would: for `--history-fixture`.
+    pub fn seed_history_list(&mut self, line: &str, ctx: &mut ViewContext<Self>) {
+        let Some(input) = self
+            .tabs()
+            .focused_pane_id()
+            .and_then(|pane| self.inputs.get(&pane))
+        else {
+            log::warn!("no focused composer to put the history list over");
+            return;
+        };
+        // The shell's own history file is somebody's, and differs on every
+        // machine: the fixture's records are the whole history.
+        input.edit(|editor| {
+            editor.seed_history(Vec::new());
+            editor.insert(line);
+        });
+        if !input.offer_history() {
+            log::warn!("nothing in the history fixture matches {line:?}");
+        }
+        ctx.notify();
+    }
+
     pub(crate) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }

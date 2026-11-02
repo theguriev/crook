@@ -25,8 +25,8 @@ pub struct History {
 }
 
 impl History {
-    /// The lines submitted this session, oldest first.
-    #[cfg(test)]
+    /// The lines submitted this session, after the shell's own history it
+    /// was seeded with, oldest first.
     pub fn entries(&self) -> &[String] {
         &self.entries
     }

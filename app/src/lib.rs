@@ -312,6 +312,12 @@ struct Overrides {
     /// every machine: the file's first line is the line, and every line after
     /// it a candidate, with its description after a tab.
     completion_fixture: Option<(String, String)>,
+    /// A line typed into the focused pane's composer with the history list
+    /// up over it, Ctrl-R's, for a picture that is the same on every machine:
+    /// the file's first line is the line, and every line after it a record
+    /// as `history.jsonl` holds one. The records stand in for the history
+    /// file, which is neither read nor written.
+    history_fixture: Option<String>,
     /// A module to run without installing it, and to run again every time it
     /// is built.
     ///
@@ -586,6 +592,7 @@ impl Overrides {
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
             || self.completion_fixture.is_some()
+            || self.history_fixture.is_some()
     }
 
     /// Whether a launcher opened this window rather than a person opening
@@ -1262,6 +1269,16 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 overrides.ask_fixture =
                     Some(workspace::AskFixture::read(std::path::Path::new(&path))?);
             }
+            "--history-fixture" => {
+                let path = args
+                    .next()
+                    .context("`--history-fixture` needs a path to a fixture")?;
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("could not read {path}"))?;
+                let (line, records) = text.split_once('\n').unwrap_or((&text, ""));
+                recall::for_a_picture(records);
+                overrides.history_fixture = Some(line.to_owned());
+            }
             "--completion-fixture" => {
                 let path = args
                     .next()
@@ -1565,6 +1582,9 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     }
     if overrides.completion_fixture.is_some() && snapshot.is_none() {
         bail!("`--completion-fixture` is an answer for a picture; it goes with `--snapshot`");
+    }
+    if overrides.history_fixture.is_some() && snapshot.is_none() {
+        bail!("`--history-fixture` is a history for a picture; it goes with `--snapshot`");
     }
 
     // A picture has no launcher. Both of these are about how a window starts
@@ -2768,6 +2788,15 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             app.update(|ctx| {
                 workspace.update(ctx, |workspace, ctx| {
                     workspace.seed_completion(line, answer, ctx);
+                });
+            });
+            frame(&mut app, &mut presenter);
+        }
+        if let Some(line) = &overrides.history_fixture {
+            await_shell(&queue, &mut app, &workspace, pane);
+            app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.seed_history_list(line, ctx);
                 });
             });
             frame(&mut app, &mut presenter);

@@ -458,6 +458,14 @@ impl CommandInput {
             // `clear-blocks` sends, because most of what a clear lets go of
             // — a find bar, a menu up on a block — is the workspace's, which
             // this element cannot reach.
+            // The history is the field's own, so there is nothing to ask: the
+            // list goes up at once, or nothing does when nothing was run.
+            Route::Edit(Intent::SearchHistory) => {
+                if self.input.offer_history() {
+                    ctx.notify();
+                }
+                true
+            }
             Route::Edit(Intent::ClearBlocks) => {
                 if let Some(id) = self.pane {
                     ctx.dispatch_typed_action(WorkspaceAction::Block(BlockAction::Clear(id)));
