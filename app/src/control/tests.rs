@@ -4540,6 +4540,7 @@ mod socket {
                     exit: Some(137),
                     took: None,
                     ran: true,
+                    directory: None,
                 },
                 ctx,
             );
@@ -4925,6 +4926,7 @@ mod socket {
                         exit: Some(0),
                         took: None,
                         ran: true,
+                        directory: None,
                     },
                     ctx,
                 );
@@ -4999,6 +5001,7 @@ mod socket {
                     exit: Some(137),
                     took: None,
                     ran: true,
+                    directory: None,
                 },
                 ctx,
             );
@@ -5156,6 +5159,7 @@ mod socket {
                     exit: Some(2),
                     took: Some(Duration::from_millis(1500)),
                     ran: true,
+                    directory: None,
                 },
                 ctx,
             );
@@ -6229,6 +6233,7 @@ mod socket {
             exit,
             took,
             ran: command.is_some(),
+            directory: None,
         };
         served.update(|workspace, ctx| {
             workspace.apply_terminal_update(&finished(None, None, None), ctx);

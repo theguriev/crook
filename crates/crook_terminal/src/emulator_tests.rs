@@ -3142,6 +3142,7 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
                     exit,
                     took: None,
                     ran,
+                    directory: None,
                 },
                 other => other,
             })

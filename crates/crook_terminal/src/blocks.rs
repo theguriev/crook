@@ -518,6 +518,12 @@ pub struct Finished {
     /// Not the status. bash 3.2 reports a bare `D` for a `( … )` line, which
     /// did run, and its command line is what says so.
     pub ran: bool,
+    /// Where the command started, as [`Block::working_directory`] has it:
+    /// the directory the block opened in, before anything it ran moved the
+    /// shell — a `cd` is filed under the directory it left.
+    pub working_directory: Option<PathBuf>,
+    /// The host that directory is on, as [`Block::working_host`] has it.
+    pub working_host: Option<String>,
 }
 
 /// Where the shell last said it was, as a block is filed under it: the
@@ -2114,6 +2120,10 @@ impl BlockTracker {
             Transition::Close(state) => {
                 // Read before the close files it, as `started_at` is, and only
                 // for the close that is told about.
+                let (working_directory, working_host) = (
+                    self.open.working_directory.clone(),
+                    self.open.working_host.clone(),
+                );
                 let command = match signal {
                     Signal::CommandFinished => self
                         .open
@@ -2134,6 +2144,8 @@ impl BlockTracker {
                         exit,
                         took: started_at.map(|at| at.elapsed()),
                         ran,
+                        working_directory,
+                        working_host,
                     });
                 }
             }

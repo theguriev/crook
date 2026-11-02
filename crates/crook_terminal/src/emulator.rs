@@ -171,6 +171,11 @@ pub enum TerminalEvent {
         /// nothing — ctrl-c at the prompt, or an empty Enter — which is still
         /// a boundary, and still reported.
         ran: bool,
+        /// Where it started, and on which host: the directory its block
+        /// opened in, as [`crate::Block::working_directory`] has it — before
+        /// anything it ran moved the shell, so a `cd` is filed under the
+        /// directory it left.
+        directory: Option<(Option<String>, PathBuf)>,
     },
     /// The child asked the terminal to close.
     Exit,
@@ -1687,6 +1692,9 @@ impl Emulator {
                         exit: finished.exit,
                         took: finished.took,
                         ran: finished.ran,
+                        directory: finished
+                            .working_directory
+                            .map(|path| (finished.working_host, path)),
                     });
                 }
             }

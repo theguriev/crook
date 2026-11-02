@@ -257,6 +257,19 @@ impl Editor {
         self.history.suggestion(&self.text)
     }
 
+    /// [`Self::suggestion`], ranked by what `recall` knows against `context`.
+    /// See [`History::suggestion_in`].
+    pub fn suggestion_in<'a>(
+        &'a self,
+        recall: &'a crate::recall::Recall,
+        context: &crate::recall::Context,
+    ) -> Option<&'a str> {
+        if !self.selection.is_empty() || self.selection.head != self.text.len() {
+            return None;
+        }
+        self.history.suggestion_in(&self.text, recall, context)
+    }
+
     // --- Placing the caret ---------------------------------------------------
 
     /// Puts the caret at `offset`, snapped onto a grapheme boundary and
