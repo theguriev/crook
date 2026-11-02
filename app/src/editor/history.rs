@@ -6,6 +6,8 @@
 //! noticed the first time someone loses a command they were composing. So the
 //! walk keeps the line it started from, and puts it back when the walk ends.
 
+use crate::recall::{Context, Recall};
+
 /// How many submitted lines one session keeps. A shell's default `HISTSIZE`,
 /// and for the same reason: far more than anyone walks through by hand, and
 /// bounded so a pane left open all week cannot grow without limit.
@@ -56,6 +58,21 @@ impl History {
     /// person who has just corrected a command wants the correction offered,
     /// not the version they ran nine times before it.
     pub fn suggestion(&self, line: &str) -> Option<&str> {
+        // Nothing recalled: every line is plain, and the newest wins.
+        static NOTHING: std::sync::LazyLock<Recall> = std::sync::LazyLock::new(Recall::default);
+        self.suggestion_in(line, &NOTHING, &Context::default())
+    }
+
+    /// What the best command for `line` would add to it, ranked by what
+    /// `recall` knows about where it ran against `context` — see
+    /// [`Recall::best`]. With nothing recalled, the newest line in this
+    /// history that starts with `line`, which is [`Self::suggestion`].
+    pub fn suggestion_in<'a>(
+        &'a self,
+        line: &str,
+        recall: &'a Recall,
+        context: &Context,
+    ) -> Option<&'a str> {
         if line.is_empty() {
             return None;
         }
@@ -72,10 +89,10 @@ impl History {
         {
             return None;
         }
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|entry| entry.strip_prefix(line).filter(|rest| !rest.is_empty()))
+        recall
+            .best(line, &self.entries, context)
+            .and_then(|command| command.strip_prefix(line))
+            .filter(|rest| !rest.is_empty())
     }
 
     /// Records a submitted line and ends any walk.

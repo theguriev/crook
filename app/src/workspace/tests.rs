@@ -26893,6 +26893,70 @@ mod shells {
         }
 
         #[test]
+        fn the_suggestion_is_the_command_run_in_the_directory_the_pane_is_in() {
+            // The same start, run in two directories, the newer one elsewhere:
+            // back in the first, the suggestion is the first one's. And how
+            // the pane got there is part of it — the records hold where each
+            // command *started*, which `cd` itself is the proof of.
+            let home = Scratch::new();
+            fs::create_dir_all(home.path().join("other")).expect("a second directory");
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, "bash", &home) else {
+                return;
+            };
+            let recorded = || crate::recall::with_user(|recall| recall.records().len());
+            let run = |harness: &mut Harness, line: &str| {
+                let before = recorded();
+                type_line(harness, line);
+                harness.press("enter", Modifiers::default(), "\r");
+                harness.wait_for(&format!("`{line}` never finished"), |_| recorded() > before);
+            };
+            // The shell starts where the suite runs; the home is a directory
+            // of the test's own.
+            run(&mut harness, &format!("cd {}", home.path().display()));
+            run(&mut harness, "echo here-first");
+            run(
+                &mut harness,
+                &format!("cd {}", home.path().join("other").display()),
+            );
+            run(&mut harness, "echo here-second");
+            // Back by another way than the first time, so that nothing
+            // followed the command just run: only the directory can choose.
+            run(&mut harness, "cd ..");
+
+            type_line(&mut harness, "echo here-");
+            let suggestion = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .input(pane)
+                    .and_then(crate::text_input::TextInput::suggestion)
+            });
+            assert_eq!(
+                suggestion.as_deref(),
+                Some("first"),
+                "the newest is from `other`; this directory ran the first"
+            );
+            let directories: Vec<_> = crate::recall::with_user(|recall| {
+                recall
+                    .records()
+                    .iter()
+                    .map(|record| (record.command.clone(), record.directory.clone()))
+                    .collect()
+            });
+            let home = home.path().to_owned();
+            let other = home.join("other");
+            assert_eq!(
+                directories[2].1.as_ref(),
+                Some(&home),
+                "a `cd` is filed where it started, not where it went"
+            );
+            assert_eq!(
+                directories[3].1.as_ref(),
+                Some(&other),
+                "and what ran after it, where it went"
+            );
+        }
+
+        #[test]
         fn escape_over_a_completion_standing_in_an_empty_composer_stays_out_of_the_shell() {
             // Tab on an empty line offers every command the shell knows, and
             // the composer then shows the first of them, dim, after its caret:
@@ -28517,6 +28581,7 @@ mod restoring {
                 exit: Some(0),
                 took: None,
                 ran: true,
+                directory: None,
             },
         );
         assert_eq!(named_agent(&harness, pane), None);
@@ -31207,6 +31272,7 @@ mod desktop_notifications {
                 exit: Some(0),
                 took: Some(LONG_COMMAND * 6),
                 ran: true,
+                directory: None,
             },
         );
 
@@ -31483,6 +31549,7 @@ mod desktop_notifications {
             exit: Some(2),
             took: Some(took),
             ran: true,
+            directory: None,
         };
 
         apply(&mut harness, finished(LONG_COMMAND * 3));
@@ -37625,6 +37692,7 @@ mod sandboxed {
                         exit: Some(0),
                         took: None,
                         ran: true,
+                        directory: None,
                     },
                     ctx,
                 );
@@ -44570,6 +44638,7 @@ mod agent_titles {
                 exit: Some(137),
                 took: None,
                 ran: true,
+                directory: None,
             },
         );
 
@@ -44975,6 +45044,7 @@ mod agent_titles {
                     exit: Some(0),
                     took: None,
                     ran: true,
+                    directory: None,
                 }
             }),
             ("a prompt again", |pane| TerminalUpdate::Running(pane, None)),

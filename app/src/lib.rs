@@ -104,6 +104,7 @@ mod platform_insets;
 mod plugin;
 mod plugins;
 pub mod process;
+mod recall;
 mod selection;
 mod session;
 mod settings;

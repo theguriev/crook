@@ -11003,6 +11003,9 @@ impl Workspace {
             }
             TerminalUpdate::WorkingDirectory(pane, directory) => {
                 let directory = directory.clone();
+                if let Some(input) = self.inputs.get(pane) {
+                    input.set_directory(Some(directory.clone()));
+                }
                 let reported = self.update_session(*pane, ctx, |session| {
                     session.set_local_directory(directory);
                 });
@@ -11040,6 +11043,7 @@ impl Workspace {
             }
             TerminalUpdate::Running(pane, command) => {
                 let starts = command.is_some();
+
                 let command = command.clone();
                 let mut changed_agent = false;
                 let reported = self.update_session(*pane, ctx, |session| {
@@ -11083,11 +11087,15 @@ impl Workspace {
             } => self.ring(*pane, *while_running, ctx),
             TerminalUpdate::CommandFinished {
                 pane,
+                command,
                 exit,
                 took,
                 ran,
-                ..
+                directory,
             } => {
+                if *ran {
+                    self.remember_command(*pane, command.as_deref(), *exit, directory.clone());
+                }
                 // Only a line that ran something: ctrl-c at the prompt and an
                 // empty Enter are marked too, and neither moves the pane on
                 // from what a restore brought back. The plugins hear both,
@@ -11275,6 +11283,38 @@ impl Workspace {
     /// and the host is part of it: calling one while the list was still
     /// borrowed would be a borrow of `self` inside a borrow of `self`. Same
     /// reason [`Self::apply`] takes the actions by handle.
+    /// Keeps what a pane's command left behind for the suggestion to rank by —
+    /// where it started, how it ended, what ran before it — and tells the
+    /// pane's field it was the last thing run there. See [`crate::recall`].
+    ///
+    /// Where it *started*, which is the block's directory and not the pane's:
+    /// by the time the end is heard a `cd` has moved the pane on, and a short
+    /// command starts and ends in one read of the pty, with no moment between
+    /// to look.
+    fn remember_command(
+        &mut self,
+        pane: PaneId,
+        command: Option<&str>,
+        exit: Option<i32>,
+        directory: Option<PathBuf>,
+    ) {
+        let Some(command) = command.filter(|command| !command.trim().is_empty()) else {
+            return;
+        };
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+        let after = input.context().and_then(|context| context.previous);
+        crate::recall::remember(crate::recall::Record {
+            command: command.to_owned(),
+            directory,
+            exit,
+            at: crate::recall::now(),
+            after,
+        });
+        input.set_previous(Some(command.to_owned()));
+    }
+
     fn command_finished(
         &mut self,
         pane: PaneId,
@@ -12991,7 +13031,15 @@ impl Workspace {
             // Not `or_default`: a pane's field opens with this person's own
             // shell history behind it, which is what the Up key reaches and
             // what the suggestion after the caret is made of.
-            self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
+            let directory = self
+                .tabs
+                .pane(*id)
+                .and_then(|pane| pane.session().working_directory.clone());
+            self.inputs.entry(*id).or_insert_with(|| {
+                let input = TextInput::for_pane();
+                input.set_directory(directory);
+                input
+            });
         }
         self.interactions.retain(|id, _| open.contains(id));
         // A line waiting for a prompt in a pane that closed first waits for

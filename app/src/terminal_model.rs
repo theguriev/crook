@@ -426,6 +426,9 @@ pub enum TerminalUpdate {
         /// Whether anything ran: `false` for the bare `D` of a line that ran
         /// nothing, ctrl-c at the prompt or an empty Enter.
         ran: bool,
+        /// The directory on this machine it started in, when the shell said
+        /// and the shell was on this machine. See [`crate::recall`].
+        directory: Option<PathBuf>,
     },
     /// The shell answered a completion request, and this is what it said.
     ///
@@ -1665,14 +1668,23 @@ impl TerminalModel {
                     exit,
                     took,
                     ran,
+                    directory,
                 } => {
                     updates.extend(stopped.take());
+                    // Only a directory on this machine: one on the far side of
+                    // an `ssh` names nothing here.
+                    let directory = directory.and_then(|(host, path)| {
+                        Remote::reported(host.as_deref(), path.clone())
+                            .is_none()
+                            .then_some(path)
+                    });
                     updates.push(TerminalUpdate::CommandFinished {
                         pane,
                         command,
                         exit,
                         took,
                         ran,
+                        directory,
                     });
                 }
                 // The escape sequence says only that an answer is ready; the
