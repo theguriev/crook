@@ -5,6 +5,26 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.42
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.41...v0.1.42)
+
+### Features
+
+- **input:** Take a completion with a press on its row in the list ([#572](https://github.com/theguriev/crook/pull/572))
+
+### Fixes
+
+- **fish:** Mark where the prompt ends on fish 4.0-4.2, and test on ubuntu-latest again ([#573](https://github.com/theguriev/crook/pull/573))
+
+### Tests
+
+- **plugins:** Wait for the hidden picker instead of racing the pool that hides it ([#571](https://github.com/theguriev/crook/pull/571))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.41
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.40...v0.1.41)
