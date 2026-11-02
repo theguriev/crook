@@ -656,6 +656,55 @@ fn adding_a_branch_that_is_already_checked_out_says_where_it_is_checked_out() {
 }
 
 #[test]
+fn a_branch_nobody_has_checked_out_is_checked_out_as_it_is() {
+    if without_git("a_branch_nobody_has_checked_out_is_checked_out_as_it_is") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-existing");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["branch", "feat/x"]);
+    git(&repo, &["checkout", "-q", "feat/x"]);
+    let tip = commit(&repo, "work.txt", "work", "work on feat/x");
+    git(&repo, &["checkout", "-q", "main"]);
+
+    let at = scratch.spot("feat-x");
+    add_existing(&repo, &at, "feat/x").expect("the branch is free to check out");
+
+    assert_eq!(git(&at, &["branch", "--show-current"]), "feat/x");
+    assert_eq!(
+        git(&at, &["rev-parse", "HEAD"]),
+        tip,
+        "on the branch's own commits, not a new branch from them"
+    );
+    assert_eq!(
+        git(&repo, &["branch", "--list", "feat/x*"]).lines().count(),
+        1,
+        "and no second branch was made"
+    );
+}
+
+#[test]
+fn checking_out_a_branch_another_checkout_has_says_where() {
+    if without_git("checking_out_a_branch_another_checkout_has_says_where") {
+        return;
+    }
+    let scratch = ScratchDir::new("add-existing-taken");
+    let repo = repo_with_a_commit(&scratch, "repo");
+
+    match add_existing(&repo, &scratch.spot("second"), "main") {
+        Err(Error::AlreadyCheckedOut { branch, at }) => {
+            assert_eq!(branch, "main");
+            assert_eq!(at, repo);
+        }
+        other => panic!("expected AlreadyCheckedOut, got {other:?}"),
+    }
+    assert!(matches!(
+        add_existing(&repo, &scratch.spot("dash"), "-"),
+        Err(Error::InvalidBranch { .. })
+    ));
+}
+
+#[test]
 fn adding_onto_a_branch_nobody_has_checked_out_says_only_that_the_name_is_taken() {
     if without_git("adding_onto_a_branch_nobody_has_checked_out_says_only_that_the_name_is_taken") {
         return;

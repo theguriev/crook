@@ -353,6 +353,12 @@ struct Overrides {
     worktrees: bool,
     /// Start with that menu making a worktree.
     creating_worktree: bool,
+    /// Start with the creator saying the name it was given is this branch,
+    /// which nobody has checked out, and offering to check it out: the face
+    /// a Create on a kept branch's name ends on, for a picture of it.
+    ///
+    /// Implies `creating_worktree`.
+    branch_exists: Option<String>,
     /// Start with that menu making a task: the creator with the first agent
     /// it found picked, which is what "New task…" in the palette opens.
     creating_task: bool,
@@ -1311,6 +1317,14 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
             "--new-worktree" => {
                 overrides.worktrees = true;
                 overrides.creating_worktree = true;
+            }
+            "--branch-exists" => {
+                overrides.worktrees = true;
+                overrides.creating_worktree = true;
+                overrides.branch_exists = Some(
+                    args.next()
+                        .context("`--branch-exists` needs a branch name")?,
+                );
             }
             "--new-task" => {
                 overrides.worktrees = true;
@@ -2459,6 +2473,9 @@ fn apply_overrides(
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
             workspace.start_creating_worktree(ctx);
+        }
+        if let Some(branch) = &overrides.branch_exists {
+            workspace.say_the_branch_exists(branch, ctx);
         }
         if overrides.creating_task {
             workspace.start_new_task(ctx);

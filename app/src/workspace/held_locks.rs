@@ -183,6 +183,27 @@ impl HeldLocks {
         base: Option<&str>,
     ) -> Result<Included, worktree::Error> {
         worktree::add(repository, path, branch, base)?;
+        Ok(self.settle_checkout(repository, path, branch))
+    }
+
+    /// Makes a checkout at `path` on `branch`, a branch that is there already
+    /// — see [`worktree::add_existing`] — and then does with it everything
+    /// [`Self::make_checkout`] does with a new one: the lock and the copy,
+    /// before a tab opens in it.
+    ///
+    /// **Blocking**, as [`Self::make_checkout`] is, within the same budget.
+    pub(crate) fn check_out_existing(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+    ) -> Result<Included, worktree::Error> {
+        worktree::add_existing(repository, path, branch)?;
+        Ok(self.settle_checkout(repository, path, branch))
+    }
+
+    /// The lock and the copy a checkout Crook has just made is given.
+    fn settle_checkout(&self, repository: &Path, path: &Path, branch: &str) -> Included {
         // Locked here, before the answer lands and the tab opens, so there is
         // no moment in which an agent is working in a checkout nothing else
         // has been told about. And handed in from here rather than with the
@@ -195,7 +216,7 @@ impl HeldLocks {
         // shell whose rc reads `.env` — `direnv`, or anything like it — reads
         // it once, as it starts, and a copy landing a moment later is a file
         // the agent's first run never saw.
-        Ok(worktree::copy_included(repository, path))
+        worktree::copy_included(repository, path)
     }
 
     /// Remembers a lock a creation has just taken, until its tab opens — or,

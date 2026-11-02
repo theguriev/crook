@@ -588,6 +588,10 @@ pub enum WorktreeAction {
     /// Open, in the file manager, the directory a removal left files in that
     /// git could not delete, while the list is saying so.
     ShowLeftBehind,
+    /// Make the creator's checkout on the branch its name already belongs
+    /// to, while the creator is saying the name is taken by a branch nobody
+    /// has checked out.
+    CheckOutExisting,
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
     /// Step the keyboard's row through the list by this many places.
