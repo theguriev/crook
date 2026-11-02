@@ -482,8 +482,17 @@ impl Session {
         // place.
         let mut used: Vec<(usize, TabId)> = Vec::new();
 
+        // Every directory asked about at once, off this thread and against
+        // one deadline, before any pane is built: see [`Present`].
+        let present = Present::check(
+            self.tabs
+                .iter()
+                .take(MAX_TABS)
+                .flat_map(|tab| tab.panes.iter().take(MAX_PANES))
+                .filter_map(PaneSnapshot::local_directory),
+        );
         for (position, snapshot) in self.tabs.iter().take(MAX_TABS).enumerate() {
-            let Some(tab) = snapshot.restore() else {
+            let Some(tab) = snapshot.restore_with(&present) else {
                 continue;
             };
             let id = tab.id();
@@ -683,6 +692,17 @@ impl TabSnapshot {
 
     /// Builds the tab this describes, or `None` when it has no panes.
     pub(crate) fn restore(&self) -> Option<Tab> {
+        let present = Present::check(
+            self.panes
+                .iter()
+                .take(MAX_PANES)
+                .filter_map(PaneSnapshot::local_directory),
+        );
+        self.restore_with(&present)
+    }
+
+    /// The same, with which of its directories are there already known.
+    fn restore_with(&self, present: &Present) -> Option<Tab> {
         let first = self.panes.first()?;
 
         // Born as the session's own name and *then* renamed, rather than born
@@ -711,10 +731,12 @@ impl TabSnapshot {
                 // Named as the tab was born, which is the name an empty title
                 // falls back on.
                 let mut made = Pane::new(born_as.clone());
-                pane.apply(&mut made);
+                pane.apply(&mut made, present);
                 made
             } else {
-                pane.restore()
+                let mut made = Pane::new(pane.title.clone());
+                pane.apply(&mut made, present);
+                made
             });
         }
         let ids: Vec<PaneId> = panes.iter().map(Pane::id).collect();
@@ -772,11 +794,21 @@ impl PaneSnapshot {
     /// take it back: a pane closed out of a split and reopened.
     pub(crate) fn restore(&self) -> Pane {
         let mut pane = Pane::new(self.title.clone());
-        self.apply(&mut pane);
+        let present = Present::check(self.local_directory());
+        self.apply(&mut pane, &present);
         pane
     }
 
-    fn apply(&self, pane: &mut Pane) {
+    /// The directory a shell would be started in on this machine, if the
+    /// pane was in one here: not one on another machine, whatever this one
+    /// has at the same path.
+    fn local_directory(&self) -> Option<&Path> {
+        self.working_directory
+            .as_deref()
+            .filter(|_| self.remote_host.is_none())
+    }
+
+    fn apply(&self, pane: &mut Pane, present: &Present) {
         pane.set_flex(self.flex);
         pane.session_mut().custom_title = self.custom_title.clone();
         // Only a directory that still exists. A repository moved or deleted
@@ -785,11 +817,9 @@ impl PaneSnapshot {
         // worse answer than the one Crook was started from. And only one on
         // this machine: another machine's is not where the new shell is,
         // whatever this one has at the same path.
-        if self.remote_host.is_none()
-            && self
-                .working_directory
-                .as_ref()
-                .is_some_and(|path| path.is_dir())
+        if self
+            .local_directory()
+            .is_some_and(|path| present.holds(path))
         {
             pane.session_mut().working_directory = self.working_directory.clone();
             // Only here, beside the directory: the conversation is kept by
@@ -803,6 +833,96 @@ impl PaneSnapshot {
                 .as_deref()
                 .and_then(|agent| Launch::remembered(agent, self.launcher.as_deref()));
         }
+    }
+}
+
+/// Which of a session's directories are there, asked off the thread that
+/// draws.
+///
+/// A directory is asked about with a `stat`, and a `stat` of a path on a
+/// network mount that has gone away — sshfs after the laptop changed
+/// networks, a hard NFS mount whose server is down — blocks in the kernel
+/// until the mount times out, and on hard NFS never does. Asked on the thread
+/// that draws, before the first frame, that was a window that never opened,
+/// with nothing on screen to say why and no way out but deleting the session
+/// file. So each is asked on a thread of its own, all of them at once, and
+/// whatever has not answered by [`Present::DEADLINE`] is taken for gone: its
+/// pane comes back where a new one starts, the way a deleted directory's
+/// does. A thread still stuck in the kernel is left there; it holds nothing
+/// and ends when the mount does.
+#[derive(Debug, Default)]
+struct Present(std::collections::HashSet<PathBuf>);
+
+impl Present {
+    /// How long a restore waits for its directories, all of them together.
+    /// A local disk answers in microseconds, a live network mount in
+    /// milliseconds; a dead one in tens of seconds or never.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Asks whether each of `directories` is one, within [`Self::DEADLINE`].
+    fn check<'a>(directories: impl IntoIterator<Item = &'a Path>) -> Self {
+        Self::check_with(directories, Self::DEADLINE, |path| path.is_dir())
+    }
+
+    /// The same, with the deadline and the question given: a test's.
+    fn check_with<'a>(
+        directories: impl IntoIterator<Item = &'a Path>,
+        deadline: std::time::Duration,
+        is_dir: impl Fn(&Path) -> bool + Clone + Send + 'static,
+    ) -> Self {
+        let mut asked = std::collections::HashSet::new();
+        let (answers, answered) = std::sync::mpsc::channel();
+        for directory in directories {
+            if !asked.insert(directory.to_path_buf()) {
+                continue;
+            }
+            let directory = directory.to_path_buf();
+            let answers = answers.clone();
+            let is_dir = is_dir.clone();
+            let spawned = std::thread::Builder::new()
+                .name("crook-restore-stat".to_owned())
+                .spawn(move || {
+                    let there = is_dir(&directory);
+                    // Nobody may be listening any more: the deadline passed.
+                    let _ = answers.send((directory, there));
+                });
+            if let Err(error) = spawned {
+                log::warn!("could not ask whether a restored directory is there: {error}");
+            }
+        }
+        drop(answers);
+
+        let until = std::time::Instant::now() + deadline;
+        let mut present = std::collections::HashSet::new();
+        let mut heard = 0;
+        while heard < asked.len() {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match answered.recv_timeout(left) {
+                Ok((directory, there)) => {
+                    heard += 1;
+                    if there {
+                        present.insert(directory);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    log::warn!(
+                        "{} restored directories did not answer within {:?}; their panes start \
+                         where a new one does",
+                        asked.len() - heard,
+                        deadline
+                    );
+                    break;
+                }
+                // Every thread has answered or could not be started.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Self(present)
+    }
+
+    /// Whether `directory` answered, and is one.
+    fn holds(&self, directory: &Path) -> bool {
+        self.0.contains(directory)
     }
 }
 
