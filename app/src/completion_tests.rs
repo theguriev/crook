@@ -3,7 +3,7 @@ use super::*;
 fn completions(candidates: &[&str]) -> Completions {
     Completions {
         candidates: candidates.iter().map(|c| (*c).to_owned()).collect(),
-        truncated: false,
+        ..Completions::default()
     }
 }
 
@@ -201,4 +201,82 @@ fn a_candidate_ending_in_an_escaped_space_keeps_it() {
     // a name ending in a backslash, followed by padding it did not escape.
     let answer = parse_answer("trail\\ \nplain   \nback\\\\ \n\n");
     assert_eq!(answer.candidates, ["trail\\ ", "plain", "back\\\\"]);
+}
+
+#[test]
+fn test_a_tab_ends_the_name_and_what_follows_is_its_description() {
+    // fish's `complete -C` and a cobra completion in bash both say what a
+    // candidate is; the snippets pass it on after a tab.
+    let answer = parse_answer("checkout\tSwitch branches\ncherry\nclone\t  Clone a repository  \n");
+
+    assert_eq!(answer.candidates, ["checkout", "cherry", "clone"]);
+    let described: Vec<_> = answer
+        .ranked("")
+        .into_iter()
+        .map(|found| (found.candidate, found.description))
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("checkout", Some("Switch branches")),
+            ("cherry", None),
+            ("clone", Some("Clone a repository")),
+        ]
+    );
+
+    // A description with nothing to describe is not a candidate.
+    assert_eq!(
+        parse_answer("\tan orphan\n").candidates,
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_a_repeated_name_keeps_the_description_it_was_first_given() {
+    // The first of a repeated name is the one listed, so the description
+    // beside it has to be that one's too.
+    let answer = parse_answer("main\tlocal branch\nmain\tremote branch\n");
+
+    let ranked = answer.ranked("ma");
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].description, Some("local branch"));
+}
+
+#[test]
+fn test_the_list_puts_the_start_of_a_name_first_and_then_letters_found_through_it() {
+    let answer = completions(&[
+        "main",
+        "feat/completion-menu",
+        "fix/card-pip-fallback",
+        "crook-plugin-fixture",
+        "facepalm",
+    ]);
+
+    let names = |word: &str| -> Vec<&str> {
+        answer
+            .ranked(word)
+            .into_iter()
+            .map(|found| found.candidate)
+            .collect::<Vec<_>>()
+    };
+    // A word that is the start of a name is the strongest thing typed, and
+    // nothing that only contains its letters goes above it.
+    assert_eq!(
+        names("f")[..3],
+        ["feat/completion-menu", "fix/card-pip-fallback", "facepalm"]
+    );
+    // Letters that start the parts of a name beat letters that happen to be in it.
+    assert_eq!(names("fcp")[0], "fix/card-pip-fallback");
+    assert!(names("fcp").contains(&"facepalm"));
+    assert!(
+        !names("fcp").contains(&"main"),
+        "a name without the letters is not listed"
+    );
+    // In order: `pcf` is not `fcp`.
+    assert!(!names("zq").contains(&"facepalm"));
+
+    // Which characters matched, for the list to draw in the accent.
+    let found = answer.ranked("fcp");
+    assert_eq!(found[0].matched, [0, 4, 9]);
+    assert_eq!(answer.ranked("ma")[0].matched, [0, 1]);
 }

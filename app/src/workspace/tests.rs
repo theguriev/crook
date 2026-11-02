@@ -26940,7 +26940,10 @@ mod shells {
                     .is_some_and(|(_, snapshot)| snapshot.line_editor)
             });
             assert!(!handed, "the shell was handed the keyboard over the offer");
-            assert!(offered(&harness), "the offer went with the Escape");
+            assert!(
+                !offered(&harness),
+                "Escape over the list is what puts the list away"
+            );
             assert!(
                 !composer_boxes(&harness.frame()).is_empty(),
                 "the composer went away over the offer it shows"

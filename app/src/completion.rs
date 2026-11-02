@@ -26,19 +26,23 @@
 //!   quickly leaves two requests outstanding, and only the second is about the
 //!   line on screen.
 //!
+//! # Descriptions
+//!
+//! A line of an answer is a candidate, and a tab in it starts what the shell
+//! says about that candidate: fish describes nearly everything, bash what a
+//! cobra-generated completion describes (gh, kubectl), zsh nothing yet.
+//!
 //! # What each shell can actually answer
 //!
 //! Not the same thing, and the difference is the shells'.
 //!
 //! * **fish** answers with `complete -C`, which is the real question: every
 //!   `complete` definition fish has, for every command.
-//! * **bash** answers with `compgen`, which is the shell's own command, file
-//!   and variable completion. The `_git`, `_docker` and `_ssh` functions that
-//!   `bash-completion` installs are *not* reached: driving one means setting
-//!   `COMP_WORDS`, `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand and
-//!   calling a function whose name has to be dug out of `complete -p`, and
-//!   getting any of it wrong runs somebody's completion script against a line
-//!   it was never given.
+//! * **bash** answers with the command's own completion when it has one —
+//!   the `_git`, `_ssh` and `_systemctl` functions `bash-completion` installs
+//!   — called the way readline would call it, and with `compgen` for commands,
+//!   files and variables otherwise. See `__crook_programmable` in the snippet
+//!   for how the line is split, which is the part that has to be readline's.
 //! * **zsh** answers with globs and its own hashes, and is the weakest of the
 //!   three. Its completion system runs inside a ZLE widget and reports through
 //!   `compstate` rather than returning anything, so there is nothing to ask
@@ -63,6 +67,13 @@ pub const MAX_CANDIDATES: usize = 256;
 pub struct Completions {
     /// The candidates, in the order the shell gave them.
     pub candidates: Vec<String>,
+    /// What the shell said about each candidate, at the same index, or an
+    /// empty string where it said nothing.
+    ///
+    /// fish describes nearly everything; bash only what a cobra-generated
+    /// completion describes (gh, kubectl, docker); zsh nothing yet. Shorter
+    /// than [`Self::candidates`], or empty, means the rest have none.
+    pub descriptions: Vec<String>,
     /// Whether the shell offered more than [`MAX_CANDIDATES`] and the rest
     /// were dropped.
     pub truncated: bool,
@@ -120,6 +131,56 @@ impl Completions {
             .collect()
     }
 
+    /// The candidates the menu shows for `word`: every one [`Self::matching`]
+    /// returns, in the shell's order, and after them the ones that hold the
+    /// letters of `word` in order but not at their start, best first.
+    ///
+    /// **The second half is what the list is for.** One candidate offered in
+    /// the line must share its start with what was typed, or the field reads as
+    /// having invented it; a list shows *which* letters matched, so `fcp` can
+    /// find `fix/card-pip-fallback` among forty branches without a person
+    /// having to type the start of it. Prefix matches still come first, in the
+    /// order the shell put them in, because a word that is the start of a name
+    /// is the strongest thing a person can have typed.
+    ///
+    /// Each match says which of its characters matched, by index, for the menu
+    /// to draw them in the accent.
+    pub fn ranked(&self, word: &str) -> Vec<Match<'_>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut prefixed = Vec::new();
+        let mut scattered = Vec::new();
+        for (at, candidate) in self.candidates.iter().enumerate() {
+            if !seen.insert(candidate.as_str()) {
+                continue;
+            }
+            let description = self
+                .descriptions
+                .get(at)
+                .map(String::as_str)
+                .filter(|description| !description.is_empty());
+            if starts_with_ignoring_case(candidate, word) {
+                prefixed.push(Match {
+                    candidate,
+                    description,
+                    matched: (0..word.chars().count()).collect(),
+                });
+            } else if let Some((score, matched)) = scattered_match(candidate, word) {
+                scattered.push((
+                    score,
+                    Match {
+                        candidate,
+                        description,
+                        matched,
+                    },
+                ));
+            }
+        }
+        // Stable, so equal scores keep the shell's order.
+        scattered.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        prefixed.extend(scattered.into_iter().map(|(_, found)| found));
+        prefixed
+    }
+
     /// What to insert in place of `word`, or `None` when there is nothing to
     /// add.
     ///
@@ -141,6 +202,56 @@ impl Completions {
     }
 }
 
+/// One candidate the menu shows, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Match<'a> {
+    /// The candidate, as it goes on the line.
+    pub candidate: &'a str,
+    /// What the shell said about it, if anything.
+    pub description: Option<&'a str>,
+    /// Which of its characters the typed word matched, by character index, in
+    /// order.
+    pub matched: Vec<usize>,
+}
+
+/// Whether `word`'s characters appear in `candidate` in order, ignoring case,
+/// and how well: the score, and the characters matched.
+///
+/// The fzf family's idea without its machinery. Each character is looked for
+/// from where the last one was found, and a match is worth more where it
+/// starts a part of the name — after `/`, `-`, `_`, `.` or at the very start —
+/// or carries straight on from the one before, which is what makes `fcp` rank
+/// `fix/card-pip` above a name that merely contains an f, a c and a p. Greedy
+/// rather than optimal, which can miss the best alignment of a word against a
+/// long name; the names a shell offers are short, and the order of the list is
+/// a hint, not a verdict.
+fn scattered_match(candidate: &str, word: &str) -> Option<(i32, Vec<usize>)> {
+    let characters: Vec<char> = candidate.chars().collect();
+    let mut matched = Vec::new();
+    let mut score = 0;
+    let mut from = 0;
+    for typed in word.chars() {
+        let found =
+            (from..characters.len()).find(|&at| same_ignoring_case(characters[at], typed))?;
+        score += 1;
+        if found == 0 || matches!(characters[found - 1], '/' | '-' | '_' | '.' | ' ') {
+            score += 8;
+        }
+        if matched.last().is_some_and(|&last| last + 1 == found) {
+            score += 4;
+        }
+        matched.push(found);
+        from = found + 1;
+    }
+    // Shorter names first among equals: less of them is left unexplained.
+    Some((score * 16 - characters.len().min(15) as i32, matched))
+}
+
+/// Whether two characters are the same but for case, in any script.
+fn same_ignoring_case(one: char, other: char) -> bool {
+    one == other || one.to_lowercase().eq(other.to_lowercase())
+}
+
 /// Whether `word` is the start of `candidate` but for case.
 ///
 /// Any script's case, not only ASCII's: `до` is the start of `Документы` as
@@ -150,10 +261,8 @@ impl Completions {
 /// (`İ`) still lines up with exactly one typed character.
 fn starts_with_ignoring_case(candidate: &str, word: &str) -> bool {
     let mut left = candidate.chars();
-    word.chars().all(|typed| {
-        left.next()
-            .is_some_and(|c| c == typed || c.to_lowercase().eq(typed.to_lowercase()))
-    })
+    word.chars()
+        .all(|typed| left.next().is_some_and(|c| same_ignoring_case(c, typed)))
 }
 
 /// Reads an answer the shell has written, or `None` when there is nothing
@@ -182,20 +291,35 @@ pub fn read_answer(path: &Path) -> Option<Completions> {
 /// prints one empty line — `printf '%s\n' ${empty[@]}` in bash, and the same
 /// shape in the other two — and an empty candidate would insert nothing and
 /// list as a blank row.
+///
+/// **A tab ends the name**, and what comes after it is the candidate's
+/// description. A name cannot hold a raw tab by the time it gets here: all
+/// three snippets write a candidate the way it has to be typed, and a typed
+/// tab is `$'\t'` in bash and zsh and `\t` in fish.
 pub fn parse_answer(text: &str) -> Completions {
-    let mut candidates: Vec<String> = text
-        .lines()
-        .map(without_trailing_blanks)
-        .filter(|line| !line.is_empty())
-        .take(MAX_CANDIDATES + 1)
-        .map(str::to_owned)
-        .collect();
+    let mut candidates = Vec::new();
+    let mut descriptions = Vec::new();
+    for line in text.lines() {
+        let (name, description) = line.split_once('\t').unwrap_or((line, ""));
+        let name = without_trailing_blanks(name);
+        if name.is_empty() {
+            continue;
+        }
+        if candidates.len() == MAX_CANDIDATES {
+            return Completions {
+                candidates,
+                descriptions,
+                truncated: true,
+            };
+        }
+        candidates.push(name.to_owned());
+        descriptions.push(description.trim().to_owned());
+    }
 
-    let truncated = candidates.len() > MAX_CANDIDATES;
-    candidates.truncate(MAX_CANDIDATES);
     Completions {
         candidates,
-        truncated,
+        descriptions,
+        truncated: false,
     }
 }
 

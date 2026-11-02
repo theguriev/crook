@@ -163,14 +163,16 @@ struct CompletionState {
     offered: Option<Offer>,
 }
 
-/// The candidates a Tab turned up, and which of them is being offered.
+/// The candidates a Tab turned up, and which of them is selected.
 ///
-/// **There is no list on screen.** A shell prints its candidates in columns
-/// and every terminal that has tried to improve on that has ended up with a
-/// panel: a second surface, in a second type, that appears under whatever a
-/// person is reading. So the answer is offered the way the history is — one
-/// candidate at a time, in dim ink after the caret, in the line itself — and
-/// Tab steps through the rest.
+/// **Two things on screen, and the line comes first.** The selected candidate
+/// is offered the way the history is — in dim ink after the caret, in the line
+/// itself — and the rest stand in a small list over the line, in the
+/// terminal's own type and on its cell grid, with what the shell said about
+/// each. One candidate at a time was the first design, and it cannot say how
+/// many there are, which one is which, or that `cherry` and `cherry-pick` are
+/// different commands; a list shown only while there is a choice to make, and
+/// gone the moment there is not, can. See [`Menu`].
 #[derive(Debug)]
 struct Offer {
     /// The word the shell was asked about.
@@ -181,8 +183,49 @@ struct Offer {
     stem: String,
     /// What it answered.
     answer: Completions,
-    /// Which of the candidates that still match is being shown.
+    /// Which of the candidates that still match is selected, as of the word
+    /// in [`Self::seen`].
     at: usize,
+    /// The word as it stood when [`Self::at`] was chosen. Typing on changes
+    /// what the list holds and what order it is in, so a selection made
+    /// against one word means nothing against the next: the top of the new
+    /// list is selected instead, the way every filtering list behaves.
+    seen: String,
+}
+
+/// How many candidates the list shows at once.
+///
+/// Enough to choose among without reading; a longer answer scrolls under the
+/// selection.
+pub const MENU_ROWS: usize = 8;
+
+/// What the list over the line shows, for the field to draw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Menu {
+    /// The candidates in view, at most [`MENU_ROWS`] of them.
+    pub items: Vec<MenuItem>,
+    /// Which of [`Self::items`] is selected.
+    pub selected: usize,
+    /// The number of the selected candidate in the whole list, from zero.
+    pub position: usize,
+    /// How many candidates still match, in view or not.
+    pub total: usize,
+    /// Whether the shell offered more than it was allowed to send.
+    pub truncated: bool,
+    /// Where in the line the word being completed begins, in bytes: what the
+    /// list lines up under.
+    pub word_start: usize,
+}
+
+/// One row of the [`Menu`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuItem {
+    /// The candidate, as it would go on the line.
+    pub candidate: String,
+    /// What the shell said about it.
+    pub description: Option<String>,
+    /// The characters the typed word matched, by character index.
+    pub matched: Vec<usize>,
 }
 
 /// The text an input method is composing, before it becomes text.
@@ -379,6 +422,7 @@ impl TextInput {
                 stem: word.to_owned(),
                 answer,
                 at: 0,
+                seen: word.to_owned(),
             })
         } else {
             None
@@ -399,25 +443,23 @@ impl TextInput {
     /// It wraps. A person pressing Tab through four candidates has no reason
     /// to be stopped at the fourth and made to press something else.
     pub fn cycle_completion(&self, forward: bool) -> bool {
+        let Some((total, at)) = self.with_offer(|ranked, at| (ranked.len(), at)) else {
+            return false;
+        };
+        if total < 2 {
+            return false;
+        }
         let line = self.line_to_caret();
-        let word = completion::word_at_end(&line);
         let mut completion = self.0.completion.borrow_mut();
         let Some(offer) = completion.offered.as_mut() else {
             return false;
         };
-        if !word.starts_with(&offer.stem) {
-            return false;
-        }
-
-        let total = offer.answer.matching(word).len();
-        if total < 2 {
-            return false;
-        }
         offer.at = if forward {
-            (offer.at + 1) % total
+            (at + 1) % total
         } else {
-            (offer.at + total - 1) % total
+            (at + total - 1) % total
         };
+        completion::word_at_end(&line).clone_into(&mut offer.seen);
         drop(completion);
         // The caret is solid while a person is stepping through candidates,
         // for the same reason it is solid while they type.
@@ -453,9 +495,14 @@ impl TextInput {
             .or_else(|| self.0.editor.borrow().suggestion().map(str::to_owned))
     }
 
-    /// The tail of the candidate being offered, if one still answers the word
-    /// under the caret.
-    fn offered_completion(&self) -> Option<String> {
+    /// Runs `look` over the candidates still on offer for the word at the
+    /// caret, best first, and the index of the selected one — or returns
+    /// `None` when nothing is on offer.
+    ///
+    /// Nothing is while the caret is anywhere but the end of the line, while
+    /// text is selected, once the word has been edited back past what the
+    /// shell was asked about, and when the word rules every candidate out.
+    fn with_offer<T>(&self, look: impl FnOnce(&[completion::Match<'_>], usize) -> T) -> Option<T> {
         let editor = self.0.editor.borrow();
         if !editor.selection().is_empty() || editor.caret() != editor.text().len() {
             return None;
@@ -470,18 +517,109 @@ impl TextInput {
             return None;
         }
 
-        let matching = offer.answer.matching(word);
-        let candidate = matching.get(offer.at.min(matching.len().checked_sub(1)?))?;
-        candidate
-            .strip_prefix(word)
-            .filter(|rest| !rest.is_empty())
-            .map(str::to_owned)
+        let ranked = offer.answer.ranked(word);
+        if ranked.is_empty() {
+            return None;
+        }
+        let at = if offer.seen == word {
+            offer.at.min(ranked.len() - 1)
+        } else {
+            0
+        };
+        Some(look(&ranked, at))
     }
 
-    /// Whether what stands after the caret is a candidate the shell offered,
-    /// rather than a line recalled from the history.
+    /// The tail of the selected candidate, if it extends the word under the
+    /// caret.
+    ///
+    /// Only one that *starts* with the word: a candidate the list found by
+    /// letters scattered through it has no tail to draw after the caret, and
+    /// stands selected in the list alone.
+    fn offered_completion(&self) -> Option<String> {
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line);
+        self.with_offer(|ranked, at| {
+            ranked[at]
+                .candidate
+                .strip_prefix(word)
+                .filter(|rest| !rest.is_empty())
+                .map(str::to_owned)
+        })
+        .flatten()
+    }
+
+    /// Whether the list of what the shell offered is up.
     pub fn has_offer(&self) -> bool {
-        self.offered_completion().is_some()
+        self.with_offer(|_, _| ()).is_some()
+    }
+
+    /// What the list over the line shows, or `None` when it is not up.
+    ///
+    /// The window of [`MENU_ROWS`] that holds the selection: from the top
+    /// until the selection would fall off its bottom, and then following it.
+    pub fn menu(&self) -> Option<Menu> {
+        let line = self.line_to_caret();
+        let word_start = line.len() - completion::word_at_end(&line).len();
+        let truncated = self
+            .0
+            .completion
+            .borrow()
+            .offered
+            .as_ref()
+            .is_some_and(|offer| offer.answer.truncated);
+        self.with_offer(|ranked, at| {
+            let first = (at + 1).saturating_sub(MENU_ROWS);
+            let items = ranked
+                .iter()
+                .skip(first)
+                .take(MENU_ROWS)
+                .map(|found| MenuItem {
+                    candidate: found.candidate.to_owned(),
+                    description: found.description.map(str::to_owned),
+                    matched: found.matched.clone(),
+                })
+                .collect();
+            Menu {
+                items,
+                selected: at - first,
+                position: at,
+                total: ranked.len(),
+                truncated,
+                word_start,
+            }
+        })
+    }
+
+    /// Puts the selected candidate on the line in place of the word under the
+    /// caret, and puts the list away. Reports whether there was one.
+    ///
+    /// In place of the word rather than after it, because the candidate may
+    /// not start with it — the list matches letters anywhere in a name — and
+    /// because the case typed may not be the case of the name.
+    pub fn accept_offer(&self) -> bool {
+        let Some(candidate) = self.with_offer(|ranked, at| ranked[at].candidate.to_owned()) else {
+            return false;
+        };
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line).len();
+        self.edit(|editor| {
+            let caret = editor.caret();
+            editor.set_selection(Selection::new(caret - word, caret));
+            editor.insert(&candidate);
+        });
+        self.forget_completions();
+        true
+    }
+
+    /// Puts the list away without taking anything from it, reporting whether
+    /// it was up: Escape.
+    pub fn dismiss_offer(&self) -> bool {
+        if !self.has_offer() {
+            return false;
+        }
+        self.forget_completions();
+        self.edit(|_| ());
+        true
     }
 
     /// Types the suggestion, all of it or one word, reporting whether there
@@ -504,6 +642,14 @@ impl TextInput {
         // about a word that is now whole.
         self.forget_completions();
         true
+    }
+
+    /// Whether the selected candidate is exactly the word already typed.
+    fn offer_is_typed(&self) -> bool {
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line);
+        self.with_offer(|ranked, at| ranked[at].candidate == word)
+            .unwrap_or(false)
     }
 
     /// Whether an input method is mid-composition here.
@@ -617,6 +763,31 @@ impl TextInput {
     /// otherwise do nothing at all: a suggestion only ever stands at the end
     /// of the line, and there is nowhere further right to go from there.
     pub fn apply(&self, intent: Intent, clipboard: &Clipboard) -> Option<String> {
+        // While the list is up, the keys every list answers to: Up and Down
+        // move through it, and Enter and Right take what is selected. Enter
+        // on a word that already *is* the selected candidate has nothing to
+        // take, and runs the line as it would have.
+        if self.has_offer() {
+            match intent {
+                Intent::HistoryUp => {
+                    self.cycle_completion(false);
+                    return None;
+                }
+                Intent::HistoryDown => {
+                    self.cycle_completion(true);
+                    return None;
+                }
+                Intent::Submit if !self.offer_is_typed() => {
+                    self.accept_offer();
+                    return None;
+                }
+                Intent::Move(Motion::Right | Motion::LineEnd | Motion::WordRight) => {
+                    self.accept_offer();
+                    return None;
+                }
+                _ => {}
+            }
+        }
         match intent {
             Intent::Move(Motion::Right | Motion::LineEnd) if self.suggestion().is_some() => {
                 self.accept_suggestion(true);
@@ -842,7 +1013,7 @@ mod tests {
     fn answer(candidates: &[&str]) -> Completions {
         Completions {
             candidates: candidates.iter().map(|c| (*c).to_owned()).collect(),
-            truncated: false,
+            ..Completions::default()
         }
     }
 
@@ -999,17 +1170,132 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_has_gone_to_the_shell_forgets_what_was_offered() {
+    fn enter_over_the_list_takes_the_selection_and_then_runs_the_line() {
         let clipboard = Clipboard::new();
         let input = holding("car");
         answered(&input, &["cargo", "carbon"]);
+        input.apply(Intent::HistoryDown, &clipboard);
+
+        assert_eq!(
+            input.apply(Intent::Submit, &clipboard),
+            None,
+            "Enter with a list up chooses from it, the way every list's does"
+        );
+        assert_eq!(input.editor().text(), "carbon");
+        assert!(!input.has_offer(), "and the list has gone with the choice");
+        assert_eq!(
+            input.apply(Intent::Submit, &clipboard).as_deref(),
+            Some("carbon"),
+            "the next Enter runs it"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_word_that_is_already_the_selection_runs_the_line() {
+        let clipboard = Clipboard::new();
+        let input = holding("ca");
+        answered(&input, &["cat", "cat-file", "cargo"]);
+        input.edit(|editor| editor.insert("t"));
+        assert!(input.has_offer(), "the premise: `cat` still lists two");
 
         assert_eq!(
             input.apply(Intent::Submit, &clipboard).as_deref(),
-            Some("car"),
-            "what was offered was never in the line, so Enter sends what was typed"
+            Some("cat"),
+            "there is nothing to take, so Enter does what it would have"
         );
+        assert_eq!(
+            input.suggestion(),
+            None,
+            "and what was offered is forgotten"
+        );
+    }
+
+    #[test]
+    fn up_and_down_move_through_the_list_and_not_the_history() {
+        let clipboard = Clipboard::new();
+        let input = holding("car");
+        answered(&input, &["cargo", "carbon", "cartridge"]);
+
+        input.apply(Intent::HistoryDown, &clipboard);
+        input.apply(Intent::HistoryDown, &clipboard);
+        assert_eq!(input.menu().map(|menu| menu.position), Some(2));
+        input.apply(Intent::HistoryUp, &clipboard);
+        assert_eq!(input.suggestion().as_deref(), Some("bon"));
+        assert_eq!(input.editor().text(), "car", "the history was not walked");
+    }
+
+    #[test]
+    fn typing_filters_the_list_and_selects_its_top_again() {
+        let clipboard = Clipboard::new();
+        let input = holding("git checkout ");
+        answered(
+            &input,
+            &["main", "feat/completion-menu", "fix/card-pip-fallback"],
+        );
+        input.apply(Intent::HistoryDown, &clipboard);
+        input.apply(Intent::HistoryDown, &clipboard);
+
+        input.edit(|editor| editor.insert("fcp"));
+        let menu = input.menu().expect("the letters are in two of the names");
+        assert_eq!(menu.items[0].candidate, "fix/card-pip-fallback");
+        assert_eq!(
+            menu.selected, 0,
+            "a new word is a new list, chosen from the top"
+        );
+        assert_eq!(
+            input.suggestion(),
+            None,
+            "a name found by scattered letters has no tail to draw after them"
+        );
+
+        assert!(input.accept_offer());
+        assert_eq!(
+            input.editor().text(),
+            "git checkout fix/card-pip-fallback",
+            "taken in place of the letters, not after them"
+        );
+    }
+
+    #[test]
+    fn escape_puts_the_list_away_and_leaves_the_line() {
+        let input = holding("car");
+        answered(&input, &["cargo", "carbon"]);
+
+        assert!(input.dismiss_offer());
+        assert!(!input.has_offer());
         assert_eq!(input.suggestion(), None);
+        assert_eq!(input.editor().text(), "car");
+        assert!(
+            !input.dismiss_offer(),
+            "a second Escape has nothing to put away"
+        );
+    }
+
+    #[test]
+    fn the_list_scrolls_to_keep_the_selection_in_view() {
+        let clipboard = Clipboard::new();
+        let input = holding("f");
+        let names: Vec<String> = (0..20).map(|index| format!("file-{index:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        answered(&input, &names);
+
+        let menu = input.menu().expect("twenty files");
+        assert_eq!(
+            (menu.items.len(), menu.total, menu.selected),
+            (MENU_ROWS, 20, 0)
+        );
+        for _ in 0..10 {
+            input.apply(Intent::HistoryDown, &clipboard);
+        }
+        let menu = input.menu().expect("still up");
+        assert_eq!(menu.position, 10);
+        assert_eq!(menu.items[menu.selected].candidate, "file-10");
+        assert_eq!(
+            menu.selected,
+            MENU_ROWS - 1,
+            "the selection is the last row in view"
+        );
+        assert_eq!(menu.word_start, 0);
     }
 
     #[test]

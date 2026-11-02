@@ -153,6 +153,10 @@ __crook_candidates() {
 		return 0
 	fi
 
+	# The command's own completion first, when it has one: `git che` is a
+	# question about git's subcommands, not about files that start with `che`.
+	__crook_programmable "$line" "$word" && return 0
+
 	case $word in
 		# A variable, which `compgen -v` knows and no glob does.
 		\$*) mapfile -t candidates < <(builtin compgen -P '$' -v -- "${word#\$}" 2>/dev/null) ;;
@@ -162,6 +166,211 @@ __crook_candidates() {
 			__crook_as_typed
 			;;
 	esac
+}
+
+# What the command's own completion says `line` could become, into the
+# `candidates` array of the caller — the `complete -F` functions bash-completion
+# installs for git, ssh, systemctl and a few hundred others. Fails, so that the
+# caller falls back to files, when the command has no completion of its own.
+#
+# **The function is given the line the way readline would give it.** That is
+# the whole risk of calling one by hand, so the split below is readline's and
+# not a guess at it: a command separator starts the line over, a run of
+# `COMP_WORDBREAKS` (`=`, `:`, `@`, ...) is a word of its own, and a line that
+# ends in a blank has an empty word at the end. What the function answers is
+# the text after the last of those breaks — readline's word, which can be
+# shorter than Crook's — so whatever of Crook's word comes before it is put
+# back in front of every candidate: `--pretty=on` asks about `on`, and the
+# answer has to come back as `--pretty=oneline`. A quote still open at the
+# caret is left to the files below, which read it as badly as they always
+# have, rather than handed to a function that would read it differently from
+# the word Crook replaces.
+#
+# `compopt` only works while readline is completing, which this is not, so it
+# is stood in for by a function that writes down what it was told: whether
+# the answer is file names (quoted, and a directory's slash added, which is
+# what readline does for them) is the function's call to make, not this one's.
+#
+# Run in this shell rather than a subshell, so that a completion loaded on the
+# first Tab is still loaded on the second; everything it sets is local here.
+__crook_programmable() {
+	local line=$1 crook_word=$2
+	local breaks=${COMP_WORDBREAKS-$' \t\n"\'@><=;|&(:'}
+	local -a words=()
+	local word='' kind='' quote='' character
+	local -i at segment=0
+	for ((at = 0; at < ${#line}; at++)); do
+		character=${line:at:1}
+		if [ -n "$quote" ]; then
+			word+=$character
+			if [ "$character" = "$quote" ]; then
+				quote=''
+			elif [ "$character" = '\' ] && [ "$quote" = '"' ]; then
+				at+=1
+				word+=${line:at:1}
+			fi
+			continue
+		fi
+		case $character in
+			\\)
+				[ "$kind" = break ] && { words+=("$word"); word=''; }
+				kind=word
+				word+=$character${line:at+1:1}
+				at+=1
+				;;
+			\" | \')
+				[ "$kind" = break ] && { words+=("$word"); word=''; }
+				kind=word
+				quote=$character
+				word+=$character
+				;;
+			' ' | $'\t' | $'\n')
+				[ -n "$word" ] && words+=("$word")
+				word='' kind=''
+				;;
+			';' | '|' | '&' | '(' | ')')
+				words=() word='' kind=''
+				segment=$((at + 1))
+				;;
+			*)
+				if [[ $breaks == *"$character"* ]]; then
+					[ "$kind" = word ] && { words+=("$word"); word=''; }
+					kind=break
+				else
+					[ "$kind" = break ] && { words+=("$word"); word=''; }
+					kind=word
+				fi
+				word+=$character
+				;;
+		esac
+	done
+	[ -n "$quote" ] && return 1
+	words+=("$word")
+
+	local -i cword=$((${#words[@]} - 1))
+	local cur=${words[cword]}
+	[ "$kind" = break ] && cur=''
+	local prev=''
+	((cword > 0)) && prev=${words[cword - 1]}
+	# What of Crook's word stands before readline's, to go back in front.
+	[[ $crook_word == *"$cur" ]] || return 1
+	local before=${crook_word%"$cur"}
+
+	if ((cword == 0)); then
+		mapfile -t candidates < <(builtin compgen -c -- "$cur" 2>/dev/null)
+	else
+		local command=${words[0]} spec
+		if ! spec=$(builtin complete -p -- "$command" 2>/dev/null); then
+			# bash-completion loads a command's completion the first time it is
+			# asked for, under whichever name its version gives the loader.
+			if declare -F _comp_complete_load >/dev/null; then
+				_comp_complete_load "$command"
+			elif declare -F __load_completion >/dev/null; then
+				__load_completion "$command"
+			elif declare -F _completion_loader >/dev/null; then
+				_completion_loader "$command"
+			fi </dev/null >/dev/null 2>&1
+			spec=$(builtin complete -p -- "$command" 2>/dev/null) || return 1
+		fi
+
+		# `complete -p` prints a `complete` command, quoted by bash itself.
+		local -a parts=() actions=()
+		eval "parts=($spec)" 2>/dev/null || return 1
+		local function='' options=' ' i
+		for ((i = 1; i < ${#parts[@]} - 1; i++)); do
+			case ${parts[i]} in
+				-F) ((++i)); function=${parts[i]} ;;
+				# A command to run for the answer is not something to run
+				# behind a person's back.
+				-C) return 1 ;;
+				-o) ((++i)); options+="${parts[i]} " ;;
+				-[AGWXPS]) actions+=("${parts[i]}" "${parts[i + 1]}"); ((++i)) ;;
+				*) actions+=("${parts[i]}") ;;
+			esac
+		done
+
+		local -a COMPREPLY=()
+		if [ -n "$function" ]; then
+			declare -F "$function" >/dev/null || return 1
+			local -a COMP_WORDS=("${words[@]}")
+			local COMP_CWORD=$cword COMP_TYPE=9 COMP_KEY=9
+			# The line from where its command starts, as readline hands it over,
+			# and the caret's place in it in bytes rather than characters.
+			local COMP_LINE=${line:segment}
+			COMP_LINE=${COMP_LINE#"${COMP_LINE%%[![:space:]]*}"}
+			local COMP_POINT length
+			__crook_byte_length "$COMP_LINE"
+			COMP_POINT=$length
+			local stood_in=''
+			if ! declare -F compopt >/dev/null; then
+				stood_in=1
+				compopt() {
+					while [ $# -gt 0 ]; do
+						case $1 in
+							-o) options+="$2 "; shift ;;
+							+o) options=${options// $2 / }; shift ;;
+						esac
+						shift
+					done
+				}
+			fi
+			"$function" "$command" "$cur" "$prev" </dev/null >/dev/null 2>&1
+			[ -n "$stood_in" ] && unset -f compopt
+		elif [ ${#actions[@]} -gt 0 ]; then
+			mapfile -t COMPREPLY < <(builtin compgen "${actions[@]}" -- "$cur" 2>/dev/null)
+			# Readline treats what a file or directory action finds as file
+			# names whatever the spec's options say: `complete -d cd` puts a
+			# slash after each one.
+			case " ${actions[*]} " in
+				*' -f '* | *' -d '* | *' -G '* | *' file '* | *' directory '*) options+='filenames ' ;;
+			esac
+		fi
+
+		# What readline does when the function found nothing, if the spec asks.
+		if [ ${#COMPREPLY[@]} -eq 0 ]; then
+			case $options in
+				*' default '*) mapfile -t COMPREPLY < <(builtin compgen -o default -- "$cur" 2>/dev/null); options+='filenames ' ;;
+				*' bashdefault '*) mapfile -t COMPREPLY < <(builtin compgen -o bashdefault -- "$cur" 2>/dev/null); options+='filenames ' ;;
+				*' dirnames '*) mapfile -t COMPREPLY < <(builtin compgen -d -- "$cur" 2>/dev/null); options+='filenames ' ;;
+			esac
+		fi
+		[[ $options == *' plusdirs '* ]] && mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(builtin compgen -d -- "$cur" 2>/dev/null)
+		candidates=("${COMPREPLY[@]}")
+		[[ $options == *' filenames '* ]] && __crook_as_typed
+	fi
+
+	__crook_described "$before"
+	return 0
+}
+
+# The length of `$1` in bytes, into `length` of the caller: `COMP_POINT` is a
+# byte offset, and `${#1}` counts characters in any locale but C.
+__crook_byte_length() {
+	local LC_ALL=C
+	length=${#1}
+}
+
+# The `candidates` array as the answer carries them: `before` in front of each,
+# and a description after a tab where the completion gave one.
+#
+# The completions cobra generates — gh, kubectl, docker, helm — describe each
+# candidate the only way `COMPREPLY` can, by padding it with spaces and putting
+# the description in brackets after it. Taken back apart, so that what goes on
+# the line is the name and what goes beside it is the description. A tab
+# cannot be part of a name here: the ones that hold one were quoted into `$'\t'`.
+__crook_described() {
+	local before=$1 i candidate description
+	local shape='^(.*[^ ])  +\((.*)\)$'
+	for i in "${!candidates[@]}"; do
+		candidate=${candidates[i]}
+		candidate=${candidate%"${candidate##*[![:space:]]}"}
+		description=''
+		if [ ${#candidates[@]} -gt 1 ] && [[ $candidate =~ $shape ]]; then
+			candidate=${BASH_REMATCH[1]}
+			description=${BASH_REMATCH[2]}
+		fi
+		candidates[i]=$before$candidate${description:+$'\t'$description}
+	done
 }
 
 # `$1` with each backslash escape taken off, into `name` of the caller: the

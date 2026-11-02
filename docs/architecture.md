@@ -3540,19 +3540,25 @@ since grown, and one it closed but for a corner:
 
   What each shell can answer differs, and the difference is the shells'. **fish** answers with
   `complete -C`, which is the real question and every `complete` definition it has. **bash**
-  answers with `compgen`: its own command, file and variable completion, but *not* the `_git`
-  and `_docker` functions `bash-completion` installs — driving one means setting `COMP_WORDS`,
-  `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand and calling a function whose name has to be
-  dug out of `complete -p`, and getting any of it wrong runs somebody's completion script
-  against a line it was never given. **zsh** is the weakest: its completion system runs inside a
+  asks the command's own completion when it has one — the `_git`, `_ssh` and `_systemctl`
+  functions `bash-completion` installs, loaded the first time they are wanted — and `compgen`
+  for commands, files and variables otherwise. Driving a completion function means setting
+  `COMP_WORDS`, `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand, and getting any of it wrong
+  runs somebody's completion script against a line it was never given, so the snippet splits
+  the line the way readline does (a test holds it to values a real readline produced) and
+  stands in for `compopt`, which only works inside readline's own completion. **zsh** is the weakest: its completion system runs inside a
   ZLE widget and reports through `compstate` rather than returning anything, so there is nothing
   to ask from outside one, and what the snippet offers is commands, files and variables out of
   zsh's own hashes and globs.
 
   What Crook does with an answer is what every shell's Tab does: one candidate is inserted
-  whole, several insert as much as they agree on, and an answer that adds nothing is listed
-  under the field instead. A list rather than a menu — a menu with a selection in it would want
-  the arrow keys, which the field spends on its history.
+  whole, several insert as much as they agree on, and what is still a choice after that stands
+  in a small list over the line — on the terminal's grid, in its type, with each candidate's
+  description — and as dim text after the caret for the one selected. Up and Down move through
+  the list while it is up, which is the only time the field gives them up from its history;
+  Enter and Right take the selection, Escape puts it away, and typing filters it by letters
+  anywhere in a name, after the names that start with what was typed. `crook-dev --snapshot
+  out.png --completion-fixture <file>` draws it without a shell to ask.
 - **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and
   `read -s` turn echo off and read a line on the *normal* screen. With marks this is now
   handled by the rule that hides the composer: the prompt happens while a command is running,
