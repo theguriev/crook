@@ -5,6 +5,26 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.40
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.39...v0.1.40)
+
+### Features
+
+- **input:** List the shell's completions over the line, and ask bash-completion for them ([#566](https://github.com/theguriev/crook/pull/566))
+
+### Tests
+
+- **settings:** Retry a save the lock kept busy in the many-windows test, as a window does ([#568](https://github.com/theguriev/crook/pull/568))
+
+### CI
+
+- Pin the Linux checks to ubuntu-24.04 while the fish tests fail under fish 4 ([#567](https://github.com/theguriev/crook/pull/567))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.39
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.38...v0.1.39)
