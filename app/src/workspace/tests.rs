@@ -37396,10 +37396,16 @@ mod sandboxed {
             !harness.a_pane_field_has_keys(),
             "the picker a press put up did not get the keyboard, so this proves nothing"
         );
-        served(&mut harness);
-        assert!(
-            !says(&redrawn(&mut harness), "somewhere"),
-            "the plugin did not hide its picker, so this proves nothing"
+        // Waited for rather than `served`: the refusal that makes the probe
+        // hide its picker goes round the pool on purpose — see the runtime's
+        // `ask` — and comes back from another thread, which a fixed number of
+        // turns of the foreground raced. On a loaded runner it lost, and the
+        // picker was still up when this looked. Each look is one render, and
+        // the probe counts renders only once it has hidden, so the first look
+        // that finds it gone is the first render it was gone for.
+        harness.wait_for(
+            "the plugin did not hide its picker, so this proves nothing",
+            |harness| !says(&redrawn(harness), "somewhere"),
         );
         (harness, before)
     }
