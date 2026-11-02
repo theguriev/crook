@@ -1271,7 +1271,10 @@ the output, the composer or any text field — is what a middle click in another
 and a middle click in a pane pastes what was selected elsewhere, at the composer's caret (beside
 what is selected there, not over it) or, under a program, as a bracketed paste (Shift past one
 that reads the mouse). The clipboard is left alone. Settings → Shell → *Middle-click pastes the selection* (`middle_click_paste`) turns
-both off. On a Wayland desktop it goes through XWayland.
+both off. On a Wayland desktop with the data-control protocol — Hyprland, Sway, KDE — the
+clipboard is the compositor's own, shared with every Wayland program; elsewhere (GNOME) it goes
+through XWayland. PRIMARY always goes through XWayland, so on Hyprland, which bridges nothing
+while Crook has the keyboard, a selection is middle-click pasted inside Crook only.
 **Files dropped on the window** have their paths typed, each quoted as one word and a space
 between two, into the focused pane — not the one under the pointer, since a drop arrives with no
 position: into its composer at the caret, or with no composer to the pty as a paste, bracketed

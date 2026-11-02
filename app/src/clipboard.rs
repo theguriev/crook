@@ -13,7 +13,7 @@
 //! nothing to be done about it and nothing worth saying, so the failure is a
 //! line in the log and "no clipboard" everywhere else.
 //!
-//! One footnote, on X11 only: a selection there is owned by the process that
+//! One footnote, on Linux: a selection there is owned by the process that
 //! set it, so text copied out of Crook stops being available the moment Crook
 //! exits. That is the protocol, not a bug, and the workaround — a daemon
 //! thread that keeps serving the selection after the process would otherwise
@@ -31,11 +31,26 @@
 //! left alone by both: selecting is not copying, and `cmd-v` still pastes
 //! what was last copied.
 //!
-//! **Only X11's.** `arboard` is built without its Wayland backend (see the
-//! workspace manifest), so a Wayland session reaches PRIMARY through XWayland,
-//! and how well that meets a native Wayland program's selection is the
-//! compositor's bridge. macOS and Windows have nothing of the kind, and there
-//! both calls do nothing — see [`HAS_PRIMARY`].
+//! **X11's, on every Linux desktop.** `arboard` is built without its Wayland
+//! backend, so PRIMARY on a Wayland session goes through XWayland — and
+//! how well that meets a native Wayland program's selection is the
+//! compositor's bridge. On Hyprland there is none while Crook has the
+//! keyboard (below), so there a selection made in Crook is pasted by a middle
+//! click in Crook, and not in a browser. Wayland's own PRIMARY would be the
+//! fix, and is not taken: Hyprland keeps no PRIMARY through data-control —
+//! `wl-copy -p` there puts nothing anywhere — and swapping it over would lose
+//! the middle click inside Crook too. macOS and Windows have no PRIMARY, and
+//! there both calls do nothing — see [`HAS_PRIMARY`].
+//!
+//! # The clipboard proper, on Wayland
+//!
+//! The clipboard `cmd-c` writes and `cmd-v` reads is the compositor's own
+//! wherever it offers the data-control protocol — Hyprland, Sway, KDE, recent
+//! wlroots — through `wl-clipboard-rs`, with no XWayland in between. It has
+//! to be: Hyprland refuses to carry a selection between X11 and Wayland while
+//! no X11 window has the keyboard, which with Crook focused is always, so an
+//! X11 clipboard there never met a browser's in either direction. Without the
+//! protocol — GNOME — it is X11's through XWayland, as before.
 //!
 //! **Read off the thread that draws.** Writing PRIMARY is taking ownership of
 //! it and returns at once; reading it is a request to whichever program owns
@@ -154,6 +169,10 @@ impl Clipboard {
     /// What is on the clipboard, or `None` when there is nothing there and
     /// when there is no clipboard to ask.
     pub fn read(&self) -> Option<String> {
+        #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+        if wayland::available() {
+            return wayland::read();
+        }
         self.with(|clipboard| clipboard.get_text())
     }
 
@@ -163,6 +182,10 @@ impl Clipboard {
     /// — never a reason to show anybody an error, and never a reason for the
     /// caller to retry.
     pub fn write(&self, text: &str) -> bool {
+        #[cfg(all(unix, not(target_os = "macos"), not(test)))]
+        if wayland::available() {
+            return wayland::write(text);
+        }
         self.with(|clipboard| clipboard.set_text(text.to_owned()))
             .is_some()
     }
@@ -359,6 +382,79 @@ impl Unanswered {
     }
 }
 
+/// The clipboard of a Wayland desktop with the data-control protocol, where
+/// there is one: the clipboard every native Wayland program reads, with no
+/// XWayland in between. See the module's section on PRIMARY.
+///
+/// Never used by a test build, which leaves the machine's clipboard to the
+/// X11 handle it always had: the suite copies hundreds of times, and those
+/// copies must not land where the person running it pastes next. Compiled
+/// into one for the test that is run by hand on a Wayland desktop.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg_attr(test, allow(dead_code))]
+mod wayland {
+    use std::io::Read;
+    use std::sync::OnceLock;
+
+    use wl_clipboard_rs::{copy, paste, utils};
+
+    /// Whether this is a Wayland session whose compositor offers
+    /// data-control. Asked once: it is the compositor's, and does not change
+    /// while Crook runs.
+    pub(super) fn available() -> bool {
+        static AVAILABLE: OnceLock<bool> = OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+                return false;
+            }
+            // The check for PRIMARY is the one that says whether data-control
+            // is there at all: an error is a compositor without it, or no
+            // compositor; `Ok` either way is one with it.
+            match utils::is_primary_selection_supported() {
+                Ok(_) => true,
+                Err(error) => {
+                    log::info!("the Wayland clipboard goes through XWayland: {error}");
+                    false
+                }
+            }
+        })
+    }
+
+    /// Puts `text` on the clipboard. Returns at once: a thread of
+    /// `wl-clipboard-rs`'s own serves it to whoever pastes, until something
+    /// else is copied — or Crook exits, which is the same footnote as X11's.
+    pub(super) fn write(text: &str) -> bool {
+        let source = copy::Source::Bytes(text.as_bytes().into());
+        match copy::Options::new().copy(source, copy::MimeType::Text) {
+            Ok(()) => true,
+            Err(error) => {
+                log::debug!("the clipboard could not be written: {error}");
+                false
+            }
+        }
+    }
+
+    /// What is on the clipboard as text, or `None` when there is nothing or
+    /// nothing that is text.
+    pub(super) fn read() -> Option<String> {
+        let read = paste::get_contents(
+            paste::ClipboardType::Regular,
+            paste::Seat::Unspecified,
+            paste::MimeType::Text,
+        );
+        let (mut pipe, _) = match read {
+            Ok(contents) => contents,
+            Err(error) => {
+                log::debug!("the clipboard could not be read: {error}");
+                return None;
+            }
+        };
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).ok()?;
+        String::from_utf8(bytes).ok()
+    }
+}
+
 /// The machine's PRIMARY, where the desktop keeps one.
 ///
 /// Compiled into a test build too, for the one test that is run by hand
@@ -461,6 +557,28 @@ mod tests {
             Some(marker.as_str()),
             "the clipboard proper was written"
         );
+    }
+
+    /// The Wayland clipboard, which the rest of the suite never touches:
+    /// written as a copy writes it and read back as a paste reads it, by
+    /// `wl-paste` as well — the native Wayland program the X11 handle never
+    /// reached on Hyprland.
+    ///
+    /// Ignored, because it takes the clipboard of whoever runs it. Run it by
+    /// hand on a Wayland desktop with data-control (Hyprland, Sway, KDE).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    #[ignore = "takes the desktop's clipboard: run it by hand on a Wayland desktop"]
+    fn the_wayland_clipboard_is_written_and_read_and_a_wayland_program_sees_it() {
+        assert!(wayland::available(), "no Wayland desktop with data-control");
+        let marker = format!("crook clipboard {}", std::process::id());
+        assert!(wayland::write(&marker));
+        assert_eq!(wayland::read().as_deref(), Some(marker.as_str()));
+        let pasted = crate::process::command("wl-paste")
+            .arg("--no-newline")
+            .output()
+            .expect("wl-paste is installed");
+        assert_eq!(String::from_utf8_lossy(&pasted.stdout), marker);
     }
 
     #[test]

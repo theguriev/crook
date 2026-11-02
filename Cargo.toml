@@ -35,6 +35,13 @@ anyhow = "1.0"
 # Text only: the default features pull in `image` for clipboard images, which
 # nothing here puts on a clipboard.
 arboard = { version = "3.6", default-features = false }
+# The clipboard of a Wayland desktop that offers the data-control protocol —
+# Hyprland, Sway, KDE, recent wlroots — reached without XWayland, which
+# Hyprland refuses to bridge while no X11 window has the keyboard. Directly
+# rather than as arboard's `wayland-data-control` feature, because that swaps
+# PRIMARY over too, and Hyprland keeps no PRIMARY through data-control: see
+# app/src/clipboard.rs. Shares winit's wayland-client.
+wl-clipboard-rs = "0.9"
 async-executor = "1.14"
 async-task = "4.7"
 # The icon a registry lists beside a plugin is a PNG written into JSON, and

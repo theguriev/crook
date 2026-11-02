@@ -77,6 +77,11 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-user-notifications.workspace = true
 
+# The Wayland clipboard, without XWayland in between. See the workspace
+# manifest.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wl-clipboard-rs.workspace = true
+
 [dev-dependencies]
 # The test shaper reorders right-to-left text as a real one does.
 unicode-bidi.workspace = true
