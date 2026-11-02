@@ -188,5 +188,24 @@ and begin
                 end
             end
         end
+
+    # fish 4.0 to 4.2 mark where a prompt starts, and where a command starts
+    # and ends, but not where the prompt *ends*: that came in 4.3. Crook reads
+    # the end as the place the line being typed begins, and without it never
+    # saw a fish on one of these at its prompt at all — Ubuntu 26.04 ships
+    # 4.2. Everything else is fish's here, so the one mark it leaves out is
+    # all this adds, at the end of the prompt the way the full set above puts
+    # it there; and on the first prompt, for the reason given there.
+    else if string match --quiet --regex -- '^4\.[012]\.' $version
+        function __crook_install_prompt_end --on-event fish_prompt
+            functions --erase __crook_install_prompt_end
+            functions --query fish_prompt
+            or return
+            functions --copy fish_prompt __crook_prompt_before_its_end
+            function fish_prompt
+                __crook_prompt_before_its_end
+                printf '\e]133;B\a'
+            end
+        end
     end
 end
