@@ -105,14 +105,18 @@ fi
 # protocol nobody should have to debug. The answer goes back the same way, and
 # the escape sequence carries only the request's number.
 #
-# **This is the weakest of the three, and the reason is zsh's.** Its completion
-# system is a ZLE thing: `_main_complete` runs inside a widget, against the
-# widget's own buffer, and reports through `compstate` rather than returning
-# anything. There is no `compgen` to ask and no `complete -C` to ask with, so
-# what this offers is commands, files and variables — the answers zsh's own
-# expansion gives — and not the `_git`, `_docker` and `_ssh` definitions that
-# make zsh's completion what it is. It is written down here rather than
-# discovered.
+# **zsh's own completion answers when it is loaded.** Its completion system is a
+# ZLE thing: `_main_complete` runs inside a completion widget, against the
+# widget's own buffer, and hands what it finds to `compadd` rather than
+# returning it. This function is itself a widget — the key Crook sends is bound
+# to it — so it can put the line in the buffer, call a completion widget of its
+# own, and stand in for `compadd` there to write down every candidate instead of
+# adding it: `_git`, `_docker`, `_ssh`, a person's own functions on `fpath` and
+# their `zstyle`s, with the descriptions zsh would list. See
+# `__crook_compsys`.
+#
+# Without `compinit` there is no `_main_complete`, and what this offers is
+# commands, files and variables out of zsh's own hashes and globs.
 __crook_complete() {
 	[[ -n ${CROOK_SCRATCH-} ]] || return 0
 	local request="$CROOK_SCRATCH/complete.in"
@@ -139,6 +143,12 @@ __crook_complete() {
 	# candidates below opt into it, with an explicit `${~word}`.
 	local prefix=${line%"$word"}
 	local -a candidates=()
+
+	if __crook_compsys "$line" "$word"; then
+		builtin printf '%s\n' ${(u)candidates} >"$answer"
+		builtin printf '\e]6339;%s\a' "$serial"
+		return 0
+	fi
 
 	# The word is text in the two hash lookups below, not a pattern: `(b)`
 	# quotes whatever in it a pattern would read. Unquoted, a `(` or a `[`
@@ -199,6 +209,131 @@ __crook_complete() {
 	# the three hashes the commands come from can name one command twice.
 	builtin printf '%s\n' ${(ou)candidates} >"$answer"
 	builtin printf '\e]6339;%s\a' "$serial"
+}
+
+# What zsh's completion system says `line` could become, into `candidates` of
+# the caller, each a name and, after a tab, what zsh said about it. Fails when
+# there is no completion system to ask — no `compinit` — or no line editor to
+# ask it from.
+#
+# The line goes into the buffer and comes back out: the person's own line is
+# Crook's, so the buffer is normally empty, and whatever it held is put back.
+# The answer is zsh's word, and Crook replaces its own, which can be longer —
+# `ls|gi` is one word to Crook and `gi` to zsh — so the part of Crook's word
+# before zsh's is put back in front of each candidate.
+__crook_compsys() {
+	(( ${+functions[_main_complete]} )) && [[ -n ${WIDGET-} ]] || return 1
+	local line=$1 crook_word=$2
+	typeset -ga __crook_captured=()
+	typeset -g __crook_captured_word=''
+	setopt localoptions nobeep
+	local buffer=$BUFFER cursor=$CURSOR
+	BUFFER=$line
+	CURSOR=${#BUFFER}
+	zle __crook_capture
+	BUFFER=$buffer
+	CURSOR=$cursor
+	[[ $crook_word == *"$__crook_captured_word" ]] || return 1
+	local before=${crook_word%"$__crook_captured_word"}
+	candidates=($before${^__crook_captured})
+	return 0
+}
+
+# The completion widget: zsh's whole completion system, run with `compadd`
+# writing down what it would have added. See `__crook_compadd`.
+__crook_capture_main() {
+	__crook_captured_word=$IPREFIX$PREFIX
+	local standing=${functions[compadd]-}
+	functions[compadd]='__crook_compadd "$@"'
+	_main_complete
+	if [[ -n $standing ]]; then
+		functions[compadd]=$standing
+	else
+		unfunction compadd
+	fi
+	# Nothing was added, so there is nothing to list and nothing to insert.
+	compstate[insert]=''
+	compstate[list]=''
+}
+zle -C __crook_capture complete-word __crook_capture_main 2>/dev/null
+
+# Stands in for `compadd` while `__crook_capture_main` runs: the words a call
+# would add are asked for with `-A` instead, so nothing is added, and each is
+# written down the way it would go on the line.
+#
+# The options are read by hand because completion functions cluster them —
+# `_describe` passes `-ld names_d` — and an option that takes a value takes the
+# rest of its cluster or the next word. What matters of them:
+#
+# * `-P`, `-p`, `-s`, `-S` and `IPREFIX`: text zsh would put around the match.
+# * `-Q`: the match is already written as it has to be typed; without it zsh
+#   quotes it, and so does this.
+# * `-f` and `-W`: the match is a file in that directory, and a directory gets
+#   the slash zsh's own Tab gives it, so the next Tab can go into it.
+# * `-d`: what zsh would list for each match, which for a described one is
+#   `name -- description`.
+#
+# A call that itself only asks — `-O`, `-A`, `-D`, which `_describe` uses to
+# sort words before adding them — is passed through untouched.
+__crook_compadd() {
+	local -A option
+	local -i at=1 skip k
+	local word letter takes='PSpsiIWdJVXxrRMFOADE'
+	while (( at <= $# )); do
+		word=${@[at]}
+		[[ $word == -- || $word != -?* ]] && break
+		skip=0
+		for (( k = 2; k <= ${#word}; k++ )); do
+			letter=${word[k]}
+			if [[ $takes == *$letter* ]]; then
+				if (( k < ${#word} )); then
+					option[$letter]=${word[k+1,-1]}
+				else
+					option[$letter]=${@[at+1]}
+					skip=1
+				fi
+				break
+			fi
+			option[$letter]=1
+		done
+		(( at += 1 + skip ))
+	done
+	if (( ${+option[O]} || ${+option[A]} || ${+option[D]} )); then
+		builtin compadd "$@"
+		return
+	fi
+
+	local -a hits displays
+	if (( ${+option[d]} )); then
+		if [[ $option[d] == \(* ]]; then
+			eval "displays=$option[d]"
+		else
+			displays=("${(@P)option[d]}")
+		fi
+	fi
+	builtin compadd -A hits -D displays "$@"
+
+	local -i i
+	local hit typed shown description place tab=$'\t'
+	for (( i = 1; i <= $#hits; i++ )); do
+		hit=$hits[i]
+		typed=$hit
+		(( ${+option[Q]} )) || typed=${(q)hit}
+		if (( ${+option[f]} )); then
+			# `-W` is where the name is on disk; `-p` is only how the part
+			# of the word before it is written.
+			if [[ -n ${option[W]-} ]]; then
+				place=${option[W]%/}/${(Q)hit}
+			else
+				place=${option[p]-}${(Q)hit}
+			fi
+			[[ -d $place && -z ${option[S]-} ]] && typed+=/
+		fi
+		shown=${displays[i]-}
+		description=''
+		[[ $shown == *' -- '* ]] && description=${shown#* -- }
+		__crook_captured+=("$IPREFIX${option[P]-}${option[p]-}$typed${option[s]-}${option[S]-}${description:+$tab$description}")
+	done
 }
 
 # A widget rather than a `bindkey -s`, because the work is a function and the

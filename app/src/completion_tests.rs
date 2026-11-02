@@ -280,3 +280,20 @@ fn test_the_list_puts_the_start_of_a_name_first_and_then_letters_found_through_i
     assert_eq!(found[0].matched, [0, 4, 9]);
     assert_eq!(answer.ranked("ma")[0].matched, [0, 1]);
 }
+
+#[test]
+fn test_a_name_given_bare_and_then_described_keeps_the_description() {
+    // zsh's `_systemctl` offers `start` from two completers, one of which says
+    // what it does.
+    let answer = parse_answer("start\nstatus\nstart\tStart one or more units\n");
+
+    let ranked = answer.ranked("st");
+    let described: Vec<_> = ranked
+        .iter()
+        .map(|found| (found.candidate, found.description))
+        .collect();
+    assert_eq!(
+        described,
+        [("start", Some("Start one or more units")), ("status", None)]
+    );
+}
