@@ -141,6 +141,12 @@ struct Inner {
     /// resets, so no answer can be mistaken for a later one.
     completion: RefCell<CompletionState>,
 
+    /// Where this field's pane is and what it ran last, which ranks the
+    /// suggestion after the caret — see [`crate::recall`]. `None` for every
+    /// field that is not a pane's command line: a palette's search box has no
+    /// directory, and the commands a person ran are nothing to suggest in it.
+    context: RefCell<Option<crate::recall::Context>>,
+
     /// Where the caret was last painted, in window coordinates.
     ///
     /// Written by the element that draws the field and read by the window,
@@ -295,7 +301,27 @@ impl TextInput {
     pub fn for_pane() -> Self {
         let input = Self::new();
         input.edit(|editor| editor.seed_history(crate::shell_history::user_history().to_vec()));
+        *input.0.context.borrow_mut() = Some(crate::recall::Context::default());
         input
+    }
+
+    /// Says where this field's pane now is, for the suggestion to rank by.
+    pub fn set_directory(&self, directory: Option<std::path::PathBuf>) {
+        if let Some(context) = self.0.context.borrow_mut().as_mut() {
+            context.directory = directory;
+        }
+    }
+
+    /// Says what this field's pane ran last, for the suggestion to rank by.
+    pub fn set_previous(&self, command: Option<String>) {
+        if let Some(context) = self.0.context.borrow_mut().as_mut() {
+            context.previous = command;
+        }
+    }
+
+    /// Where this field's pane is and what it ran last, if it is a pane's.
+    pub fn context(&self) -> Option<crate::recall::Context> {
+        self.0.context.borrow().clone()
     }
 
     /// An empty input with nothing typed into it.
@@ -307,6 +333,7 @@ impl TextInput {
             has_keys: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             completion: RefCell::new(CompletionState::default()),
+            context: RefCell::new(None),
             caret_rect: Cell::new(None),
         }));
         // A field starts its blink lit, and the window's clock has to know,
@@ -485,14 +512,24 @@ impl TextInput {
     /// Two sources, and the order is what makes them one feature. A candidate
     /// the shell offered comes first: Tab is a question somebody has just
     /// asked, and the answer to it outranks anything recalled. Otherwise it is
-    /// the newest command in the history that starts with this line — zsh's
-    /// `autosuggestions` and Warp's ghost text, which are the same thing.
+    /// a command from the history that starts with this line — zsh's
+    /// `autosuggestions` and Warp's ghost text, which are the same thing — and
+    /// in a pane's field the one that fits where the pane is: ran in this
+    /// directory, after what the pane just ran, and not one that failed. See
+    /// [`crate::recall`].
     ///
     /// Only ever at the very end of the line, because text after the caret is
     /// text the suggestion would be standing in front of.
     pub fn suggestion(&self) -> Option<String> {
-        self.offered_completion()
-            .or_else(|| self.0.editor.borrow().suggestion().map(str::to_owned))
+        self.offered_completion().or_else(|| {
+            let editor = self.0.editor.borrow();
+            match self.0.context.borrow().as_ref() {
+                Some(context) => crate::recall::with_user(|recall| {
+                    editor.suggestion_in(recall, context).map(str::to_owned)
+                }),
+                None => editor.suggestion().map(str::to_owned),
+            }
+        })
     }
 
     /// Runs `look` over the candidates still on offer for the word at the

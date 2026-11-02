@@ -248,6 +248,7 @@ fn test_an_empty_line_sent_from_the_field_starts_nothing() {
                     exit: None,
                     took: None,
                     ran: false,
+                    ..
                 }]
             ),
             "{line:?}: {events:?}"
