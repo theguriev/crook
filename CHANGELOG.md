@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.41
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.40...v0.1.41)
+
+### Features
+
+- **input:** Suggest the command run in this directory, after this one, that worked ([#569](https://github.com/theguriev/crook/pull/569))
+- **zsh:** Ask zsh's own completion system for a Tab's candidates ([#570](https://github.com/theguriev/crook/pull/570))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.40
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.39...v0.1.40)
