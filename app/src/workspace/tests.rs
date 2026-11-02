@@ -2603,6 +2603,58 @@ fn closing_a_group_asks_when_any_tab_in_it_is_working() {
 }
 
 #[test]
+fn work_that_started_while_the_close_was_asked_about_is_asked_about_before_it_is_ended() {
+    // Close other tabs, with an agent at work in one of them. While the card
+    // is up another tab starts working — an agent opened it, or a command was
+    // left running in it. End would close it too, and the card never said so.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    let named = harness.panes_of(tabs[1])[0];
+    harness.update_session(named, |session| session.status = AgentStatus::Running);
+
+    harness.dispatch_action(TabAction::CloseOthers(tabs[0]));
+    assert_eq!(harness.asking_about(), Some(vec![named]));
+
+    let started = harness.panes_of(tabs[2])[0];
+    harness.update_session(started, |session| session.status = AgentStatus::Running);
+    harness.press_closing_button("End it and close");
+
+    assert_eq!(
+        harness.tab_ids(),
+        tabs,
+        "a tab whose work the card did not name was closed"
+    );
+    assert_eq!(
+        harness.asking_about(),
+        Some(vec![named, started]),
+        "asked again, about everything it would end now"
+    );
+
+    harness.press_closing_button("End them and close");
+    assert_eq!(harness.tab_ids(), [tabs[0]]);
+    assert_eq!(harness.quit_requests(), 0);
+}
+
+#[test]
+fn work_that_stopped_while_the_close_was_asked_about_is_not_asked_about_again() {
+    // The other way round is nothing new to warn about: End closes at once.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    let one = harness.panes_of(tabs[1])[0];
+    let two = harness.panes_of(tabs[2])[0];
+    for pane in [one, two] {
+        harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    }
+
+    harness.dispatch_action(TabAction::CloseOthers(tabs[0]));
+    harness.update_session(two, |session| session.status = AgentStatus::Idle);
+    harness.press_closing_button("End them and close");
+
+    assert_eq!(harness.tab_ids(), [tabs[0]]);
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
 fn closing_the_last_tab_with_its_agent_running_asks_as_quitting() {
     // The strip never empties: the last tab going is the window going, and a
     // card that said "close" over it would be wrong about the one thing it

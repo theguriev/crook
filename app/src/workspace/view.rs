@@ -3895,6 +3895,22 @@ impl Workspace {
         self.sync_input_keys();
         ctx.notify();
         if answer == EndingAction::End {
+            // Worked out again against the strip as it is now, the way the
+            // close itself will be: "Close other tabs" ends whichever tabs are
+            // others *now*, and a tab an agent opened while the card was up is
+            // one of them. Ending work the card never named is what the card
+            // exists to prevent, so what it would end that it did not name is
+            // asked about first — on a fresh card, whose wait for the keyboard
+            // to be still starts over, so the press that answered this one
+            // cannot answer that one too.
+            let unnamed = question
+                .close
+                .working(&self.tabs)
+                .into_iter()
+                .any(|pane| !question.working().contains(&pane));
+            if unnamed && self.ask_before(question.close, ctx) {
+                return;
+            }
             self.close_now(question.close, ctx);
         }
         if self.focused_agent_is_asking() {
