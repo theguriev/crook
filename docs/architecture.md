@@ -3559,7 +3559,7 @@ since grown, and one it closed but for a corner:
   in a small list over the line — on the terminal's grid, in its type, with each candidate's
   description — and as dim text after the caret for the one selected. Up and Down move through
   the list while it is up, which is the only time the field gives them up from its history;
-  Enter and Right take the selection, Escape puts it away, and typing filters it by letters
+  Enter, Right and a press on a row take the selection, Escape puts it away, and typing filters it by letters
   anywhere in a name, after the names that start with what was typed. `crook-dev --snapshot
   out.png --completion-fixture <file>` draws it without a shell to ask.
 - **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and

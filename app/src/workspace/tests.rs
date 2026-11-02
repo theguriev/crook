@@ -20247,6 +20247,41 @@ mod shells {
     }
 
     #[test]
+    fn a_press_on_a_row_of_the_completion_list_takes_that_candidate() {
+        // The list stands over the output, outside the field's box, and the
+        // press used to fall through to the output under it: no row was ever
+        // chosen and a selection started in the block behind.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.workspace_update(|workspace, ctx| {
+            workspace.seed_completion(
+                "git che",
+                "checkout\tSwitch branches\ncherry-pick\tApply commits\ncherry\tFind commits\n",
+                ctx,
+            );
+        });
+        let scene = harness.frame();
+        let (at, _) = text_lines(&scene, |_| true)
+            .into_iter()
+            .find(|(_, line)| line.starts_with("cherry-pick"))
+            .expect("the list draws its second row");
+
+        // On the row, a little above its baseline, as a pointer would be.
+        harness.click(at + vec2f(4., -4.), MouseButton::Left);
+
+        assert_eq!(harness.field_text(pane), "git cherry-pick");
+        let up = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .input(pane)
+                .is_some_and(crate::text_input::TextInput::has_offer)
+        });
+        assert!(!up, "the list goes with the choice");
+    }
+
+    #[test]
     fn a_sent_line_can_be_recalled_from_the_history_and_sent_again() {
         // Per pane, and it is the field's own history rather than the shell's:
         // the shell never saw the line until it was sent, so it has nothing to

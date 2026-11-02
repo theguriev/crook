@@ -648,6 +648,23 @@ impl TextInput {
         true
     }
 
+    /// Selects the candidate at `position` in the whole list and takes it, as
+    /// Enter would: a press on its row. Reports whether there was one there.
+    pub fn choose_offer(&self, position: usize) -> bool {
+        let Some(total) = self.with_offer(|ranked, _| ranked.len()) else {
+            return false;
+        };
+        if position >= total {
+            return false;
+        }
+        let line = self.line_to_caret();
+        if let Some(offer) = self.0.completion.borrow_mut().offered.as_mut() {
+            offer.at = position;
+            completion::word_at_end(&line).clone_into(&mut offer.seen);
+        }
+        self.accept_offer()
+    }
+
     /// Puts the list away without taking anything from it, reporting whether
     /// it was up: Escape.
     pub fn dismiss_offer(&self) -> bool {
