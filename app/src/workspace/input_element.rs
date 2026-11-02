@@ -84,7 +84,7 @@ use crook_terminal::Snapshot;
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Ime, Keystroke, MouseButton};
-use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
+use crookui_core::geometry::{Color, Point, RectF, Vector2F, ZIndex, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::{Border, ClipBounds, CornerRadius, PointerShape, Radius, Scene};
 use unicode_segmentation::UnicodeSegmentation;
@@ -234,6 +234,40 @@ pub struct CommandInput {
     budget: usize,
     /// What Tab does while a suggestion stands. See [`TabKey`].
     tab_key: TabKey,
+    /// Where the completion list was last painted, for a press on one of its
+    /// rows. `None` while there is no list.
+    menu_place: Option<MenuPlace>,
+}
+
+/// Where a painted completion list is, and which candidate each row holds.
+#[derive(Clone, Copy, Debug)]
+struct MenuPlace {
+    /// The list's box, ground and border.
+    bounds: RectF,
+    /// The top of its first row.
+    first_row: f32,
+    /// How tall a row is.
+    row_height: f32,
+    /// The candidate the first row in view holds, counted in the whole list.
+    first: usize,
+    /// How many rows are in view.
+    rows: usize,
+    /// The layer it was painted in, for asking whether something painted
+    /// later covers the point pressed.
+    z_index: ZIndex,
+}
+
+impl MenuPlace {
+    /// The candidate in the whole list on the row at `position`, if the
+    /// position is on a row at all.
+    fn candidate_at(&self, position: Vector2F) -> Option<usize> {
+        let offset = position.y() - self.first_row;
+        if offset < 0. {
+            return None;
+        }
+        let row = (offset / self.row_height) as usize;
+        (row < self.rows).then_some(self.first + row)
+    }
 }
 
 impl CommandInput {
@@ -255,6 +289,7 @@ impl CommandInput {
             rows: None,
             budget: MAX_ROWS,
             tab_key: TabKey::default(),
+            menu_place: None,
         }
     }
 
@@ -762,12 +797,14 @@ impl Element for CommandInput {
         // The completion list stands over the output above the line, so it
         // gets a layer of its own, later than the list's and therefore over
         // it, and clipped to the pane rather than to this box.
+        self.menu_place = None;
         if self.focused
             && !self.input.is_composing()
             && let Some(menu) = self.input.menu()
         {
             ctx.scene.start_layer(ClipBounds::ActiveLayer);
-            paint_menu(
+            let z_index = ctx.scene.z_index();
+            let painted = paint_menu(
                 &menu,
                 self.input.editor().text(),
                 rows,
@@ -778,6 +815,14 @@ impl Element for CommandInput {
                 ctx.scene,
             );
             ctx.scene.stop_layer();
+            self.menu_place = painted.map(|(bounds, first_row)| MenuPlace {
+                bounds,
+                first_row,
+                row_height: self.font.metrics().height,
+                first: menu.position - menu.selected,
+                rows: menu.items.len(),
+                z_index,
+            });
         }
     }
 
@@ -808,6 +853,28 @@ impl Element for CommandInput {
                 ..
             } => return self.input.release(&self.clipboard),
             _ => {}
+        }
+
+        // A press on the completion list, which stands outside this box and in
+        // a later layer than it: tested against the list's own layer, before
+        // the test against this element's below would call it covered by the
+        // list itself. A row takes its candidate; the rest of the box is
+        // still the list's, and a press there does nothing rather than fall
+        // through to the output under it.
+        if let Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            ..
+        } = event.raw_event()
+            && let Some(place) = self.menu_place
+            && place.bounds.contains_point(*position)
+            && !ctx.is_covered(Point::from_vec2f(*position, place.z_index))
+        {
+            if let Some(candidate) = place.candidate_at(*position) {
+                self.input.choose_offer(candidate);
+            }
+            ctx.notify();
+            return true;
         }
 
         // Keystrokes are never filtered by what is painted over them; a press
@@ -1420,10 +1487,8 @@ fn paint_menu(
     ink: Ink,
     font: &CellFont,
     scene: &mut Scene,
-) {
-    let Some((row, column)) = rows.place(text, menu.word_start) else {
-        return;
-    };
+) -> Option<(RectF, f32)> {
+    let (row, column) = rows.place(text, menu.word_start)?;
     let metrics = font.metrics();
     let at = origin + rows.offset(row, metrics);
 
@@ -1468,9 +1533,12 @@ fn paint_menu(
         .max(origin.x());
     let top = at.y() - MENU_MARGIN - size.y();
 
+    // Recorded for hit testing, so that a press on the list is the list's:
+    // the output under it asks whether it is covered, and it is.
     let radius = CornerRadius::with_all(Radius::Pixels(6.));
+    let bounds = RectF::new(vec2f(left, top), size);
     scene
-        .draw_rect_without_hit_recording(RectF::new(vec2f(left, top), size))
+        .draw_rect_with_hit_recording(bounds)
         .with_background(theme().surface_raised)
         .with_border(Border::all(1.).with_border_color(theme().overlay_2))
         .with_corner_radius(radius);
@@ -1522,6 +1590,7 @@ fn paint_menu(
         let row_at = first + vec2f(0., menu.items.len() as f32 * metrics.height);
         paint_cells(&count, inner, row_at, metrics, font, scene, |_| dim);
     }
+    Some((bounds, first.y()))
 }
 
 /// Draws `text` from `at` in at most `room` cells, cutting it short with an
