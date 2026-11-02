@@ -9328,6 +9328,28 @@ impl Workspace {
     }
 
     /// The command line being composed in a pane.
+    /// Types `line` into the focused pane's composer and answers a completion
+    /// about it with `answer`, as a shell would have: a picture's, so that the
+    /// completion list can be drawn without a shell to ask. The text after
+    /// the line's last `|`, if it has one, is typed after the answer, which is
+    /// how a list filtered by typing is drawn.
+    pub fn seed_completion(&mut self, line: &str, answer: &str, ctx: &mut ViewContext<Self>) {
+        let Some(input) = self
+            .tabs()
+            .focused_pane_id()
+            .and_then(|pane| self.inputs.get(&pane))
+        else {
+            log::warn!("no focused composer to seed a completion in");
+            return;
+        };
+        let (asked, typed) = line.split_once('|').unwrap_or((line, ""));
+        input.edit(|editor| editor.insert(asked));
+        let serial = input.ask_for_completions();
+        input.take_completions(serial, crate::completion::parse_answer(answer));
+        input.edit(|editor| editor.insert(typed));
+        ctx.notify();
+    }
+
     pub(crate) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }

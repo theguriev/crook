@@ -3164,6 +3164,92 @@ done"#,
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_a_bash_command_with_a_completion_of_its_own_is_asked_through_it() {
+    // `git che` is a question about git's subcommands, and bash-completion's
+    // `_git` is what knows them. The function is called by hand, so what it is
+    // handed has to be what readline would hand it: the values asserted below
+    // are the ones a real readline gave a `complete -F` function for the same
+    // lines. Stand-ins for the functions, so the test needs no bash-completion.
+    let directory = TempDir::new("bash-programmable");
+    fs::create_dir_all(directory.path().join("projects"))
+        .expect("the directory should be creatable");
+    fs::write(directory.path().join("notes file.txt"), "").expect("the file should be writable");
+    let snippet = directory.path().join("crook.bash");
+    fs::write(&snippet, BASH_SNIPPET).expect("the snippet should be writable");
+
+    let Ok(output) = crate::process::command("bash")
+        .args(["--norc", "--noprofile", "-i", "-c"])
+        .arg(
+            r#"[ "${BASH_VERSINFO[0]}" -ge 4 ] || exit 77
+. "$1"
+__test_git() {
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$COMP_LINE" "$COMP_POINT" "$COMP_CWORD" "${COMP_WORDS[*]}" "$1" "$2" "$3" >>asked
+    case $2 in
+        che) COMPREPLY=(checkout cherry-pick cherry) ;;
+        on) COMPREPLY=(oneline) ;;
+    esac
+}
+complete -F __test_git tgit
+__test_files() { compopt -o filenames; mapfile -t COMPREPLY < <(compgen -f -- "$2"); }
+complete -F __test_files tfiles
+__test_cobra() { COMPREPLY=("checkout  (Check out a pull request)" "checks    (Show CI status)"); }
+complete -F __test_cobra tgh
+__test_nothing() { COMPREPLY=(); }
+complete -o default -F __test_nothing tdefault
+complete -d tcd
+for line in "tgit che" "tgit log --pretty=on" "echo a | tgit che" "tfiles no" "tgh pr " "tcd proj" "tdefault no" "tgit 'che"; do
+    candidates=()
+    __crook_candidates "$line"
+    printf '%s|' "${candidates[@]}"
+    printf '\n'
+done
+cat asked"#,
+        )
+        .arg("crook-test")
+        .arg(&snippet)
+        .current_dir(directory.path())
+        .env("HOME", directory.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    if output.status.code() == Some(77) {
+        return;
+    }
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "checkout|cherry-pick|cherry|",
+            // Readline's word is `on`, after the `=`; Crook's is the whole
+            // `--pretty=on`, so the answer comes back with the rest in front.
+            "--pretty=oneline|",
+            // A pipe starts the line over, as it does for readline.
+            "checkout|cherry-pick|cherry|",
+            // The function said these are file names, so they are typed as
+            // file names are.
+            "notes\\ file.txt|",
+            "checkout\tCheck out a pull request|checks\tShow CI status|",
+            "projects/|",
+            // Nothing from the function, and the spec says files then.
+            "notes\\ file.txt|",
+            // A quote still open is not handed to the function: the files
+            // below answer it, and there are none.
+            "|",
+            // What the function was handed, one line per call: the same as
+            // a real readline gives.
+            "tgit che|8|1|tgit che|tgit|che|tgit",
+            "tgit log --pretty=on|20|4|tgit log --pretty = on|tgit|on|=",
+            "tgit che|8|1|tgit che|tgit|che|tgit",
+        ],
+        "{said}"
+    );
+}
+
 #[test]
 fn test_a_fish_that_marks_its_own_prompt_still_answers_crooks_completion() {
     // fish 4 writes its own prompt marks and the snippet stands down for them,

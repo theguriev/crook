@@ -86,7 +86,7 @@ use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Ime, Keystroke, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene};
+use crookui_core::scene::{Border, ClipBounds, CornerRadius, PointerShape, Radius, Scene};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -101,8 +101,7 @@ use crate::settings::TabKey;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
-use crate::text_input::Preedit;
-use crate::text_input::TextInput;
+use crate::text_input::{Menu, Preedit, TextInput};
 use crate::theme::theme;
 
 use super::action::{BlockAction, WorkspaceAction};
@@ -118,6 +117,19 @@ const MAX_ROWS: usize = 8;
 /// what they have typed from what is merely on offer, and the only thing
 /// saying so is this.
 const SUGGESTION_ALPHA: u8 = 110;
+
+/// The widest a candidate is drawn in the completion list, in cells, before
+/// it is cut short.
+const MENU_NAME_CELLS: usize = 48;
+
+/// The widest a candidate's description is drawn, in cells.
+const MENU_DESCRIPTION_CELLS: usize = 56;
+
+/// The cells between a candidate and its description.
+const MENU_GAP_CELLS: usize = 2;
+
+/// The space between the list and the row it stands over, in pixels.
+const MENU_MARGIN: f32 = 4.;
 
 /// How thick the rule under a composition is, as a fraction of the cell.
 const PREEDIT_RULE_RATIO: f32 = 0.06;
@@ -316,6 +328,18 @@ impl CommandInput {
     fn type_key(&self, keystroke: &Keystroke, chars: &str, ctx: &mut EventContext) -> bool {
         if !self.input.has_keys() {
             return false;
+        }
+
+        // Escape puts the completion list away, and does nothing else: it
+        // reaches neither the line nor the shell's line editor, which an
+        // Escape in an empty field otherwise would.
+        let modifiers = keystroke.modifiers;
+        if keystroke.key == "escape"
+            && !(modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.cmd)
+            && self.input.dismiss_offer()
+        {
+            ctx.notify();
+            return true;
         }
 
         // The terminal's own word, as of this keystroke rather than of the
@@ -732,6 +756,27 @@ impl Element for CommandInput {
                 .request_pointer(RectF::new(origin, size), PointerShape::Text);
         }
         if layered {
+            ctx.scene.stop_layer();
+        }
+
+        // The completion list stands over the output above the line, so it
+        // gets a layer of its own, later than the list's and therefore over
+        // it, and clipped to the pane rather than to this box.
+        if self.focused
+            && !self.input.is_composing()
+            && let Some(menu) = self.input.menu()
+        {
+            ctx.scene.start_layer(ClipBounds::ActiveLayer);
+            paint_menu(
+                &menu,
+                self.input.editor().text(),
+                rows,
+                origin,
+                self.size.map_or(0., Vector2F::x),
+                self.ink,
+                &self.font,
+                ctx.scene,
+            );
             ctx.scene.stop_layer();
         }
     }
@@ -1343,6 +1388,179 @@ fn paint_suggestion(
         for character in grapheme.chars() {
             paint_character(character, pen, color, font, scene);
         }
+        column += wide;
+    }
+}
+
+/// Draws the list of what the shell offered, over the row the word being
+/// completed is on, its left edge under the word's first cell.
+///
+/// **On the terminal's grid, in the terminal's type.** Each row is one cell
+/// high and every character sits in a cell, as the output above does, so the
+/// list reads as part of the pane rather than as a popup from somewhere else;
+/// only its ground, a hairline and a rounded corner say it floats. Above the
+/// line rather than under it, because the composer is the bottom of the pane
+/// and there is nothing under it to stand over.
+///
+/// Matched characters are drawn in the accent — that is what tells a person
+/// why `fix/card-pip` is in a list they filtered with `fcp` — and a
+/// description in the same dim ink as the suggestion after the caret, since
+/// it is not something that would be typed. A count stands under the rows
+/// when there are more candidates than rows.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "what `paint_input` draws with, less the caret and plus the list"
+)]
+fn paint_menu(
+    menu: &Menu,
+    text: &str,
+    rows: &Rows,
+    origin: Vector2F,
+    width: f32,
+    ink: Ink,
+    font: &CellFont,
+    scene: &mut Scene,
+) {
+    let Some((row, column)) = rows.place(text, menu.word_start) else {
+        return;
+    };
+    let metrics = font.metrics();
+    let at = origin + rows.offset(row, metrics);
+
+    let names = menu
+        .items
+        .iter()
+        .map(|item| cells(&item.candidate))
+        .max()
+        .unwrap_or(0)
+        .min(MENU_NAME_CELLS);
+    let descriptions = menu
+        .items
+        .iter()
+        .filter_map(|item| item.description.as_deref().map(cells))
+        .max()
+        .unwrap_or(0)
+        .min(MENU_DESCRIPTION_CELLS);
+    let counted = menu.total > menu.items.len() || menu.truncated;
+
+    // One cell of padding either side; the description gives way first when
+    // the pane is too narrow for all of it, and the names after it.
+    let padding = metrics.width;
+    let room = (((width - 2. * padding) / metrics.width).floor().max(0.)) as usize;
+    let names = names.min(room);
+    let descriptions = if descriptions > 0 {
+        descriptions.min(room.saturating_sub(names + MENU_GAP_CELLS))
+    } else {
+        0
+    };
+    let inner = names
+        + if descriptions > 0 {
+            MENU_GAP_CELLS + descriptions
+        } else {
+            0
+        };
+    let size = vec2f(
+        inner as f32 * metrics.width + 2. * padding,
+        (menu.items.len() + usize::from(counted)) as f32 * metrics.height + padding,
+    );
+    let left = (at.x() + column as f32 * metrics.width - padding)
+        .min(origin.x() + width - size.x())
+        .max(origin.x());
+    let top = at.y() - MENU_MARGIN - size.y();
+
+    let radius = CornerRadius::with_all(Radius::Pixels(6.));
+    scene
+        .draw_rect_without_hit_recording(RectF::new(vec2f(left, top), size))
+        .with_background(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+        .with_corner_radius(radius);
+
+    let dim = ink.text.with_alpha(SUGGESTION_ALPHA);
+    let accent = theme().accent;
+    let first = vec2f(left + padding, top + padding / 2.);
+    for (index, item) in menu.items.iter().enumerate() {
+        let row_at = first + vec2f(0., index as f32 * metrics.height);
+        if index == menu.selected {
+            scene
+                .draw_rect_without_hit_recording(RectF::new(
+                    row_at - vec2f(padding / 2., 0.),
+                    vec2f(inner as f32 * metrics.width + padding, metrics.height),
+                ))
+                .with_background(theme().overlay_2)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+        }
+        paint_cells(&item.candidate, names, row_at, metrics, font, scene, |at| {
+            if item.matched.contains(&at) {
+                accent
+            } else {
+                ink.text
+            }
+        });
+        if let Some(description) = item.description.as_deref()
+            && descriptions > 0
+        {
+            let shifted = row_at + vec2f((names + MENU_GAP_CELLS) as f32 * metrics.width, 0.);
+            paint_cells(
+                description,
+                descriptions,
+                shifted,
+                metrics,
+                font,
+                scene,
+                |_| dim,
+            );
+        }
+    }
+
+    if counted {
+        let count = format!(
+            "{}/{}{}",
+            menu.position + 1,
+            menu.total,
+            if menu.truncated { "+" } else { "" }
+        );
+        let row_at = first + vec2f(0., menu.items.len() as f32 * metrics.height);
+        paint_cells(&count, inner, row_at, metrics, font, scene, |_| dim);
+    }
+}
+
+/// Draws `text` from `at` in at most `room` cells, cutting it short with an
+/// ellipsis when it does not fit. `ink` picks each character's colour by its
+/// index in the text.
+fn paint_cells(
+    text: &str,
+    room: usize,
+    at: Vector2F,
+    metrics: CellMetrics,
+    font: &CellFont,
+    scene: &mut Scene,
+    ink: impl Fn(usize) -> Color,
+) {
+    let fits = cells(text) <= room;
+    let mut column = 0;
+    let mut index = 0;
+    for grapheme in text.graphemes(true) {
+        let wide = cells(grapheme);
+        // The last cell is the ellipsis's when the text runs past the room.
+        if column + wide > room || (!fits && column + wide >= room) {
+            if !fits && column < room {
+                let pen = vec2f(
+                    at.x() + column as f32 * metrics.width,
+                    at.y() + metrics.baseline,
+                );
+                paint_character('…', pen, ink(index), font, scene);
+            }
+            return;
+        }
+        let pen = vec2f(
+            at.x() + column as f32 * metrics.width,
+            at.y() + metrics.baseline,
+        );
+        let color = ink(index);
+        for character in grapheme.chars() {
+            paint_character(character, pen, color, font, scene);
+        }
+        index += grapheme.chars().count();
         column += wide;
     }
 }
