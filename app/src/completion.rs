@@ -30,7 +30,8 @@
 //!
 //! A line of an answer is a candidate, and a tab in it starts what the shell
 //! says about that candidate: fish describes nearly everything, bash what a
-//! cobra-generated completion describes (gh, kubectl), zsh nothing yet.
+//! cobra-generated completion describes (gh, kubectl), zsh whatever its
+//! completion system would list beside a match.
 //!
 //! # What each shell can actually answer
 //!
@@ -43,10 +44,12 @@
 //!   — called the way readline would call it, and with `compgen` for commands,
 //!   files and variables otherwise. See `__crook_programmable` in the snippet
 //!   for how the line is split, which is the part that has to be readline's.
-//! * **zsh** answers with globs and its own hashes, and is the weakest of the
-//!   three. Its completion system runs inside a ZLE widget and reports through
-//!   `compstate` rather than returning anything, so there is nothing to ask
-//!   from outside one.
+//! * **zsh** answers with its own completion system when `compinit` has
+//!   loaded it. That system runs only inside a completion widget and hands
+//!   what it finds to `compadd`; the snippet's handler is a widget already,
+//!   so it runs a completion widget of its own over the line and stands in
+//!   for `compadd` to write the candidates down — see `__crook_compsys` in
+//!   the snippet. Without `compinit`, globs and zsh's own hashes.
 //!
 //! All three are honest about being the shell's own answer for the common
 //! cases — a command, a path, a variable — which is what Tab is for most of
@@ -71,7 +74,7 @@ pub struct Completions {
     /// empty string where it said nothing.
     ///
     /// fish describes nearly everything; bash only what a cobra-generated
-    /// completion describes (gh, kubectl, docker); zsh nothing yet. Shorter
+    /// completion describes (gh, kubectl, docker); zsh what it would list. Shorter
     /// than [`Self::candidates`], or empty, means the rest have none.
     pub descriptions: Vec<String>,
     /// Whether the shell offered more than [`MAX_CANDIDATES`] and the rest
@@ -146,18 +149,25 @@ impl Completions {
     /// Each match says which of its characters matched, by index, for the menu
     /// to draw them in the accent.
     pub fn ranked(&self, word: &str) -> Vec<Match<'_>> {
+        // A name the shell gave more than once is listed once, where it first
+        // came, with the first thing said about it in any of its places: zsh
+        // offers `start` bare from one completer and described from another.
+        let mut described = std::collections::HashMap::new();
+        for (candidate, description) in self.candidates.iter().zip(&self.descriptions) {
+            if !description.is_empty() {
+                described
+                    .entry(candidate.as_str())
+                    .or_insert(description.as_str());
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         let mut prefixed = Vec::new();
         let mut scattered = Vec::new();
-        for (at, candidate) in self.candidates.iter().enumerate() {
+        for candidate in &self.candidates {
             if !seen.insert(candidate.as_str()) {
                 continue;
             }
-            let description = self
-                .descriptions
-                .get(at)
-                .map(String::as_str)
-                .filter(|description| !description.is_empty());
+            let description = described.get(candidate.as_str()).copied();
             if starts_with_ignoring_case(candidate, word) {
                 prefixed.push(Match {
                     candidate,

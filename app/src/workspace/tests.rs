@@ -26893,6 +26893,60 @@ mod shells {
         }
 
         #[test]
+        fn tab_in_a_zsh_with_compinit_asks_zshs_own_completion() {
+            // `git che` is a question for `_git`, which only zsh's completion
+            // system can answer — and only from inside a completion widget.
+            // Globs alone offer the files starting `che`, of which there are
+            // none, so a list of git's commands is the system answering.
+            let home = Scratch::new();
+            fs::write(
+                home.path().join(".zshrc"),
+                format!(
+                    "autoload -Uz compinit && compinit -u -d {}/zcompdump\n",
+                    home.path().display()
+                ),
+            )
+            .expect("a zshrc in a scratch home");
+            let mut harness = Harness::panel(1);
+            let Some(pane) = a_shell_at_home(&mut harness, "zsh", &home) else {
+                return;
+            };
+            if installed("git").is_none() {
+                eprintln!("skipped: no git here for zsh to complete");
+                return;
+            }
+            let menu = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .input(pane)
+                        .and_then(crate::text_input::TextInput::menu)
+                })
+            };
+
+            type_line(&mut harness, "git che");
+            harness.press("tab", Modifiers::default(), "\t");
+            harness.wait_for("zsh offered no list for `git che`", |harness| {
+                menu(harness).is_some()
+            });
+
+            let shown = menu(&harness).expect("the list is up");
+            let checkout = shown
+                .items
+                .iter()
+                .find(|item| item.candidate == "checkout")
+                .unwrap_or_else(|| panic!("`checkout` is git's: {shown:?}"));
+            assert!(
+                checkout.description.is_some(),
+                "and zsh says what it does: {checkout:?}"
+            );
+            assert_eq!(
+                harness.field_text(pane),
+                "git che",
+                "nothing was typed for it"
+            );
+        }
+
+        #[test]
         fn the_suggestion_is_the_command_run_in_the_directory_the_pane_is_in() {
             // The same start, run in two directories, the newer one elsewhere:
             // back in the first, the suggestion is the first one's. And how

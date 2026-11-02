@@ -3546,10 +3546,13 @@ since grown, and one it closed but for a corner:
   `COMP_WORDS`, `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand, and getting any of it wrong
   runs somebody's completion script against a line it was never given, so the snippet splits
   the line the way readline does (a test holds it to values a real readline produced) and
-  stands in for `compopt`, which only works inside readline's own completion. **zsh** is the weakest: its completion system runs inside a
-  ZLE widget and reports through `compstate` rather than returning anything, so there is nothing
-  to ask from outside one, and what the snippet offers is commands, files and variables out of
-  zsh's own hashes and globs.
+  stands in for `compopt`, which only works inside readline's own completion. **zsh** asks its own completion system when `compinit` has loaded
+  it. That system runs only inside a completion widget and hands what it finds to `compadd`
+  rather than returning it; the snippet's handler is a ZLE widget already, so it puts the line
+  in the buffer, runs a completion widget of its own over it, and stands in for `compadd` there
+  to write each candidate down — quoted as zsh would insert it, a directory with its slash, and
+  the description zsh would list. Without `compinit` it offers commands, files and variables
+  out of zsh's own hashes and globs.
 
   What Crook does with an answer is what every shell's Tab does: one candidate is inserted
   whole, several insert as much as they agree on, and what is still a choice after that stands
