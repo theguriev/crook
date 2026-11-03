@@ -7674,6 +7674,75 @@ fn closing_the_tab_a_menu_is_open_on_takes_the_menu_with_it() {
 }
 
 #[test]
+fn a_name_that_is_a_branch_nobody_has_out_offers_to_check_that_branch_out() {
+    // A task finished before it landed: its checkout is gone and its branch
+    // kept. The creator, given that branch's name, used to say only that the
+    // name was taken; the work could not get back into a checkout of its own.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let kept = crate::process::command("git")
+        .args(["branch", "feat/kept"])
+        .current_dir(&repository)
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(kept, "the premise: a branch with no checkout");
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.name_the_worktree("feat/kept");
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("git to refuse the name", |harness| {
+        harness.worktree_problem().is_some()
+    });
+    assert!(
+        says(&harness.frame(), "Check out feat/kept"),
+        "the creator offers the branch: {:?}",
+        harness.worktree_problem()
+    );
+
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::CheckOutExisting);
+    harness.wait_for("the branch to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the new tab focused its pane");
+    let checkout = harness
+        .working_directory(opened)
+        .expect("the tab opened in the checkout");
+    let on = crate::process::command("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&checkout)
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    assert_eq!(
+        on.ok().as_deref(),
+        Some("feat/kept"),
+        "on the kept branch itself"
+    );
+
+    harness.dispatch_action(TabAction::ClosePane(opened));
+    wait_for_the_locks_to_come_off(&mut harness);
+}
+
+#[test]
 fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
     // The × is a descendant of the row, and a `Hoverable` runs its own click
     // handler whether or not a child already handled the release. Without a

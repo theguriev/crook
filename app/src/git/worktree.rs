@@ -1402,6 +1402,46 @@ pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> 
     })
 }
 
+/// Makes a checkout of `repository` at `path` on `branch`, a branch that is
+/// there already: the one [`add`] said was taken, picked up where it was left.
+///
+/// **Blocking**: `git worktree add` and the `post-checkout` hook it runs.
+///
+/// What a task finished before it landed leaves behind — its checkout gone,
+/// its branch kept — and what the next agent on that work needs: the same
+/// branch, in a checkout of its own, so that its commits land where the pull
+/// request is looking. [`add`] cannot do it, by design: it makes a branch.
+///
+/// The branch's upstream, if it has one, is left as it is: this is not a new
+/// branch whose upstream git would invent, it is somebody's branch.
+///
+/// `branch` is refused when it is empty or begins with a dash, as in [`add`];
+/// past `--` git reads a lone `-` as `@{-1}`. A branch some other checkout has
+/// out is [`Error::AlreadyCheckedOut`], which says where.
+pub fn add_existing(repository: &Path, path: &Path, branch: &str) -> Result<(), Error> {
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err(Error::InvalidBranch {
+            branch: branch.to_owned(),
+        });
+    }
+    let finished = run(
+        repository,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--"),
+            path.as_os_str(),
+            OsStr::new(branch),
+        ],
+        Intent::Write,
+    )?;
+    if finished.success {
+        Ok(())
+    } else {
+        Err(classify(&finished.stderr))
+    }
+}
+
 /// Removes the checkout at `path`, leaving its branch alone.
 ///
 /// **Blocking**: it deletes a directory tree.

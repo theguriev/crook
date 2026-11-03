@@ -6037,6 +6037,13 @@ impl Workspace {
             WorktreeAction::StartCreating => self.start_creating(false, ctx),
             WorktreeAction::Create => self.create_worktree(false, ctx),
             WorktreeAction::Start => self.create_worktree(true, ctx),
+            WorktreeAction::CheckOutExisting => {
+                if self.tab_menu.mode == WorktreeMode::Creating
+                    && let Some(branch) = self.tab_menu.existing_branch().map(str::to_owned)
+                {
+                    self.check_out_worktree(branch, ctx);
+                }
+            }
             WorktreeAction::NewTask(tab) => {
                 // Not a toggle, which is what opening the menu on the tab it
                 // is already up on would be: the palette asked for the
@@ -6664,6 +6671,23 @@ impl Workspace {
     /// Puts the menu into its creator, for a run that was asked to start there.
     pub fn start_creating_worktree(&mut self, ctx: &mut ViewContext<Self>) {
         self.apply_worktree(WorktreeAction::StartCreating, ctx);
+    }
+
+    /// Has the creator say `branch` is the name it was given, a branch nobody
+    /// has checked out, and offer to check it out: what a Create on that name
+    /// ends on, and `--branch-exists`.
+    pub fn say_the_branch_exists(&mut self, branch: &str, ctx: &mut ViewContext<Self>) {
+        if let Some(field) = self.worktree_branch() {
+            field.edit(|editor| editor.set_text(branch));
+        }
+        let problem = crate::git::worktree::Error::BranchExists {
+            branch: branch.to_owned(),
+        };
+        self.tab_menu.say_branch_exists(
+            format!("{problem}, and nothing has it checked out."),
+            branch.to_owned(),
+        );
+        ctx.notify();
     }
 
     /// Puts it into its creator as "New task…" opens it, for a run that was
@@ -7693,14 +7717,29 @@ impl Workspace {
     /// the pane is there — and is sent only when `send`, which is the Start
     /// button and nothing else.
     fn create_worktree(&mut self, send: bool, ctx: &mut ViewContext<Self>) {
+        self.make_worktree(send, None, ctx);
+    }
+
+    /// What the creator's Create does, on `branch` as it is rather than a new
+    /// branch: Check out, under the sentence saying the name is taken. Start's
+    /// own press is not repeated — the line goes to the composer, to be run
+    /// when somebody has seen which branch it is running on.
+    fn check_out_worktree(&mut self, branch: String, ctx: &mut ViewContext<Self>) {
+        self.make_worktree(false, Some(branch), ctx);
+    }
+
+    /// Makes the creator's checkout — on a new branch, or on `existing` — and
+    /// opens a tab in it.
+    fn make_worktree(&mut self, send: bool, existing: Option<String>, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.working {
             return;
         }
 
-        let branch = self
-            .worktree_branch()
-            .map(|field| field.editor().text().trim().to_owned())
-            .unwrap_or_default();
+        let branch = existing.clone().unwrap_or_else(|| {
+            self.worktree_branch()
+                .map(|field| field.editor().text().trim().to_owned())
+                .unwrap_or_default()
+        });
         let (Some(repository), Some(path)) = (
             self.tab_menu.pane_directory.clone(),
             super::tab_menu::checkout_for(self),
@@ -7743,7 +7782,12 @@ impl Workspace {
         let made = ctx.background().spawn({
             let path = path.clone();
             let held = self.held.clone();
-            async move { held.make_checkout(&repository, &path, &branch, base.as_deref()) }
+            async move {
+                match existing {
+                    Some(_) => held.check_out_existing(&repository, &path, &branch),
+                    None => held.make_checkout(&repository, &path, &branch, base.as_deref()),
+                }
+            }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {
@@ -7803,11 +7847,15 @@ impl Workspace {
                     }
                 }
                 Err(problem) => {
-                    if answering {
+                    if !answering {
+                        log::warn!("a worktree nobody is waiting for failed: {problem}");
+                    } else if let crate::git::worktree::Error::BranchExists { branch } = &problem {
+                        // Nobody has it out, so it can be picked up as it is:
+                        // what a task finished before it landed leaves.
+                        workspace.say_the_branch_exists(branch, ctx);
+                    } else {
                         workspace.tab_menu.problem = Some(problem.to_string());
                         ctx.notify();
-                    } else {
-                        log::warn!("a worktree nobody is waiting for failed: {problem}");
                     }
                 }
             }

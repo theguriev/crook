@@ -548,6 +548,9 @@ pub(super) enum Control {
     /// "Show the folder", under a sentence saying a removal left files in
     /// one.
     ShowLeftBehind,
+    /// "Check out <branch>", under a sentence saying the creator's name is
+    /// a branch already.
+    CheckOutExisting,
 }
 
 /// Whether a menu is up, on which tab, and what it is showing.
@@ -674,6 +677,11 @@ pub(super) struct TabMenuState {
     /// the directory they are in: what Show the folder opens, while that
     /// sentence is the one [`Self::problem`] holds. See [`Self::left_behind`].
     left_behind: Option<(String, PathBuf)>,
+    /// The sentence that said the creator's name is a branch already, which
+    /// nobody has checked out, and that branch: what Check out picks up,
+    /// while that sentence is the one [`Self::problem`] holds. See
+    /// [`Self::existing_branch`].
+    existing: Option<(String, String)>,
     /// Whether a git command is running for the creator or the confirmation
     /// right now. The sweep keeps its own, inside [`Sweep`], because its
     /// running state has a count in it.
@@ -786,6 +794,21 @@ impl TabMenuState {
     pub(super) fn say_left_behind(&mut self, problem: String, folder: Option<PathBuf>) {
         self.left_behind = folder.map(|folder| (problem.clone(), folder));
         self.problem = Some(problem);
+    }
+
+    /// Says `problem` under the creator, and offers under it to check out
+    /// `branch`: the branch the name the creator was given already is.
+    pub(super) fn say_branch_exists(&mut self, problem: String, branch: String) {
+        self.existing = Some((problem.clone(), branch));
+        self.problem = Some(problem);
+    }
+
+    /// The branch Check out picks up, while the sentence that offered it is
+    /// still the one the menu says — kept with its sentence for the reason
+    /// [`Self::left_behind`] is.
+    pub(super) fn existing_branch(&self) -> Option<&str> {
+        let (said, branch) = self.existing.as_ref()?;
+        (self.problem.as_ref() == Some(said)).then_some(branch.as_str())
     }
 
     /// The directory Show the folder opens, while the sentence that offered
@@ -1151,6 +1174,24 @@ fn show_left_behind(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         "Show the folder",
         false,
         Some(WorkspaceAction::Worktree(WorktreeAction::ShowLeftBehind)),
+        ui,
+    ))
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(4.)
+    .finish()
+}
+
+/// Check out the branch, under the sentence saying the creator's name is one
+/// already: a task finished before it landed keeps its branch, and the next
+/// agent on that work needs that branch — its commits are what the pull
+/// request is looking for — not a new one from it under another name.
+fn check_out_existing(workspace: &Workspace, branch: &str, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.tab_menu();
+    Container::new(button(
+        state.control(Control::CheckOutExisting),
+        &format!("Check out {branch}"),
+        false,
+        Some(WorkspaceAction::Worktree(WorktreeAction::CheckOutExisting)),
         ui,
     ))
     .with_horizontal_padding(ROW_INSET)
@@ -1793,6 +1834,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
+    }
+    if let Some(branch) = state.existing_branch() {
+        column.add_child(check_out_existing(workspace, branch, ui));
     }
     // Under the path rather than in the button, which used to say "Working…"
     // in the accent as though it could still be pressed. What is being waited
