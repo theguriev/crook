@@ -76,6 +76,16 @@ command -v npx >/dev/null || fail "node is needed to run changelogen — https:/
 [ -z "$(git status --porcelain)" ] || fail "the tree is not clean"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "$tag already exists"
 
+# A release is cut from what main is on GitHub, not from a checkout that has
+# fallen behind it: a pull request merged while this one was being cut would
+# leave the release commit unpushable, and the tag on a commit main never gets.
+# Asked only when pushing, since without --push nothing leaves this machine yet.
+if [ -n "$push" ]; then
+  git fetch -q origin main || fail "could not fetch origin/main to compare it with this checkout"
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+    || fail "this main is not origin/main ($(git rev-parse --short HEAD) here, $(git rev-parse --short origin/main) there); pull, and release once CI has passed what came in"
+fi
+
 # The previous release is the newest v* tag; the crate tags (crook_wasm-v0.8.0)
 # are a different thing and are skipped on purpose, which is also why
 # changelogen is never left to pick "the latest tag" by itself.
@@ -162,8 +172,12 @@ echo "==> Committed and tagged $tag"
 
 if [ -n "$push" ]; then
   echo "==> Pushing main and $tag"
-  git push origin main "$tag"
+  # Both or neither. Pushed one ref at a time, a main rejected for having
+  # moved on still let the tag through, and release.yml built a release from a
+  # commit main never got — with the next release's range starting at a tag
+  # that is not on main at all.
+  git push --atomic origin main "$tag"
   echo "==> release.yml is building https://github.com/theguriev/crook/releases/tag/$tag"
 else
-  echo "==> Not pushed. When it looks right:  git push origin main $tag"
+  echo "==> Not pushed. When it looks right:  git push --atomic origin main $tag"
 fi
