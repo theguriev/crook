@@ -5,6 +5,32 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.43
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.42...v0.1.43)
+
+### Features
+
+- **worktrees:** Check out a kept branch when the creator's name is one ([#581](https://github.com/theguriev/crook/pull/581))
+- **input:** Type a space after a completion that leaves nothing to choose ([#574](https://github.com/theguriev/crook/pull/574))
+- **input:** List the commands run before with ctrl+r over a written line ([#575](https://github.com/theguriev/crook/pull/575))
+- **agent:** Connect coding agents to Crook in one click ([#565](https://github.com/theguriev/crook/pull/565))
+
+### Fixes
+
+- **close:** Ask again when End would close work the card never named ([#580](https://github.com/theguriev/crook/pull/580))
+- **clipboard:** Use the Wayland clipboard where the compositor offers data-control ([#577](https://github.com/theguriev/crook/pull/577))
+- **release:** Push main and the tag atomically, and only from origin/main ([#578](https://github.com/theguriev/crook/pull/578))
+- **session:** Ask whether restored directories are there off the UI thread, with a deadline ([#579](https://github.com/theguriev/crook/pull/579))
+
+### Tests
+
+- **recall:** Wait for the pane to hear where cd left it before reading the suggestion ([#576](https://github.com/theguriev/crook/pull/576))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.42
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.41...v0.1.42)
