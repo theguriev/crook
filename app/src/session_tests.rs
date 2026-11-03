@@ -2061,3 +2061,54 @@ fn the_first_window_makes_the_folder_it_keeps_the_session_in() {
         "a window on a first run kept a session another window keeps"
     );
 }
+
+#[test]
+fn a_directory_that_never_answers_is_taken_for_gone_within_the_deadline() {
+    // A dead network mount: the `stat` blocks, here until the test lets it go.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Arc::new(std::sync::Mutex::new(held));
+    let is_dir = move |path: &Path| {
+        if path == Path::new("/mnt/gone") {
+            let _ = held.lock().map(|held| held.recv());
+            return true;
+        }
+        path != Path::new("/deleted")
+    };
+
+    let started = std::time::Instant::now();
+    let present = Present::check_with(
+        [
+            Path::new("/home/me/repo"),
+            Path::new("/mnt/gone"),
+            Path::new("/deleted"),
+            Path::new("/home/me/repo"),
+        ],
+        std::time::Duration::from_millis(100),
+        is_dir,
+    );
+    let waited = started.elapsed();
+
+    assert!(present.holds(Path::new("/home/me/repo")));
+    assert!(!present.holds(Path::new("/deleted")));
+    assert!(
+        !present.holds(Path::new("/mnt/gone")),
+        "a directory that did not answer is not waited for"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "the restore waited {waited:?} for a mount that will never answer"
+    );
+    drop(release);
+}
+
+#[test]
+fn directories_that_all_answer_are_not_waited_on_past_their_answers() {
+    let started = std::time::Instant::now();
+    let present = Present::check_with(
+        [Path::new("/a"), Path::new("/b")],
+        std::time::Duration::from_secs(30),
+        |_: &Path| true,
+    );
+    assert!(present.holds(Path::new("/a")) && present.holds(Path::new("/b")));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
