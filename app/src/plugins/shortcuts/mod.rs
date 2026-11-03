@@ -538,6 +538,12 @@ pub(crate) const PANE_KEYS: &[PaneKey] = &[
         other: "ctrl+l",
     },
     PaneKey {
+        label: "List the commands run before, from a written line",
+        keywords: &["history", "ctrl-r", "search", "recall", "fuzzy"],
+        mac: "ctrl+r",
+        other: "ctrl+r",
+    },
+    PaneKey {
         label: "Search the shell's own history, from an empty line",
         keywords: &[
             "ctrl-r",

@@ -197,6 +197,20 @@ struct Offer {
     /// against one word means nothing against the next: the top of the new
     /// list is selected instead, the way every filtering list behaves.
     seen: String,
+    /// Whether the candidates are whole lines, filtered by everything typed
+    /// and taken in place of all of it: the history list, Ctrl-R. Otherwise
+    /// they are the shell's answer about the last word.
+    whole: bool,
+}
+
+/// What an offer filters by and replaces: the whole line for the history
+/// list, the word at its end for a shell's answer.
+fn offered_word(line: &str, whole: bool) -> &str {
+    if whole {
+        line
+    } else {
+        completion::word_at_end(line)
+    }
 }
 
 /// How many candidates the list shows at once.
@@ -462,6 +476,7 @@ impl TextInput {
                 answer,
                 at: 0,
                 seen: word.to_owned(),
+                whole: false,
             })
         } else {
             None
@@ -498,7 +513,7 @@ impl TextInput {
         } else {
             (at + total - 1) % total
         };
-        completion::word_at_end(&line).clone_into(&mut offer.seen);
+        offered_word(&line, offer.whole).clone_into(&mut offer.seen);
         drop(completion);
         // The caret is solid while a person is stepping through candidates,
         // for the same reason it is solid while they type.
@@ -559,7 +574,7 @@ impl TextInput {
         drop(editor);
 
         let line = self.line_to_caret();
-        let word = completion::word_at_end(&line);
+        let word = self.word_for(&line);
         let completion = self.0.completion.borrow();
         let offer = completion.offered.as_ref()?;
         if !word.starts_with(&offer.stem) {
@@ -586,7 +601,7 @@ impl TextInput {
     /// stands selected in the list alone.
     fn offered_completion(&self) -> Option<String> {
         let line = self.line_to_caret();
-        let word = completion::word_at_end(&line);
+        let word = self.word_for(&line);
         self.with_offer(|ranked, at| {
             ranked[at]
                 .candidate
@@ -595,6 +610,54 @@ impl TextInput {
                 .map(str::to_owned)
         })
         .flatten()
+    }
+
+    /// The part of `line` the offer standing in this field filters by.
+    fn word_for<'a>(&self, line: &'a str) -> &'a str {
+        let whole = self
+            .0
+            .completion
+            .borrow()
+            .offered
+            .as_ref()
+            .is_some_and(|offer| offer.whole);
+        offered_word(line, whole)
+    }
+
+    /// Puts the commands run before up as a list over the line, filtered by
+    /// what it holds, reporting whether there were any: Ctrl-R.
+    ///
+    /// The same list a Tab puts up, with whole commands in it: the ones that
+    /// fit this pane first — run here, after what it just ran, and not one
+    /// that failed, as [`crate::recall`] ranks the suggestion — then the
+    /// rest, newest first, then the lines the shell's own history file
+    /// held. Typing filters it the way it filters a shell's answer, prefix
+    /// first and then letters in order, so `gco` finds `git checkout`; Enter
+    /// puts the chosen command on the line in place of what was typed, and
+    /// a second Enter runs it.
+    pub fn offer_history(&self) -> bool {
+        let editor = self.0.editor.borrow();
+        if !editor.selection().is_empty() || editor.caret() != editor.text().len() {
+            return false;
+        }
+        let line = editor.text().to_owned();
+        let context = self.0.context.borrow().clone().unwrap_or_default();
+        let answer = crate::recall::with_user(|recall| {
+            recall.listed(editor.history(), &context, crate::recall::now())
+        });
+        drop(editor);
+        if answer.ranked(&line).is_empty() {
+            return false;
+        }
+        self.0.completion.borrow_mut().offered = Some(Offer {
+            stem: String::new(),
+            answer,
+            at: 0,
+            seen: line,
+            whole: true,
+        });
+        self.edit(|_| ());
+        true
     }
 
     /// Whether the list of what the shell offered is up.
@@ -608,7 +671,7 @@ impl TextInput {
     /// until the selection would fall off its bottom, and then following it.
     pub fn menu(&self) -> Option<Menu> {
         let line = self.line_to_caret();
-        let word_start = line.len() - completion::word_at_end(&line).len();
+        let word_start = line.len() - self.word_for(&line).len();
         let truncated = self
             .0
             .completion
@@ -649,14 +712,23 @@ impl TextInput {
         let Some(candidate) = self.with_offer(|ranked, at| ranked[at].candidate.to_owned()) else {
             return false;
         };
+        // A command from the history is a whole line, not a word: it is run or
+        // edited next, not followed by another argument.
+        let whole = self
+            .0
+            .completion
+            .borrow()
+            .offered
+            .as_ref()
+            .is_some_and(|offer| offer.whole);
         let line = self.line_to_caret();
-        let word = completion::word_at_end(&line).len();
+        let word = self.word_for(&line).len();
         self.edit(|editor| {
             let caret = editor.caret();
             editor.set_selection(Selection::new(caret - word, caret));
             editor.insert(&candidate);
         });
-        if completion::closes_word(&candidate) {
+        if !whole && completion::closes_word(&candidate) {
             self.close_word();
         }
         self.forget_completions();
@@ -692,7 +764,7 @@ impl TextInput {
         let line = self.line_to_caret();
         if let Some(offer) = self.0.completion.borrow_mut().offered.as_mut() {
             offer.at = position;
-            completion::word_at_end(&line).clone_into(&mut offer.seen);
+            offered_word(&line, offer.whole).clone_into(&mut offer.seen);
         }
         self.accept_offer()
     }
@@ -733,7 +805,7 @@ impl TextInput {
     /// Whether the selected candidate is exactly the word already typed.
     fn offer_is_typed(&self) -> bool {
         let line = self.line_to_caret();
-        let word = completion::word_at_end(&line);
+        let word = self.word_for(&line);
         self.with_offer(|ranked, at| ranked[at].candidate == word)
             .unwrap_or(false)
     }
@@ -1028,7 +1100,7 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
         Complete | CompleteBackwards | AskCompletions => {}
         // Nor this: the element that saw it clears the pane, and the line
         // stays as it was, which is readline's own Ctrl-L.
-        ClearBlocks => {}
+        ClearBlocks | SearchHistory => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),
@@ -1187,6 +1259,51 @@ mod tests {
         answered(&input, &["cargo", "cargo-fmt"]);
         assert_eq!(input.editor().text(), "cargo");
         assert!(input.has_offer());
+    }
+
+    #[test]
+    fn control_r_lists_the_history_and_enter_puts_the_choice_on_the_line() {
+        let clipboard = Clipboard::new();
+        let input = TextInput::new();
+        input.edit(|editor| {
+            editor.seed_history(vec![
+                "git checkout main".to_owned(),
+                "cargo build".to_owned(),
+                "git commit -m wip".to_owned(),
+            ])
+        });
+        input.edit(|editor| editor.insert("gco"));
+
+        assert!(input.offer_history());
+        let menu = input.menu().expect("the list is up");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            ["git commit -m wip", "git checkout main"],
+            "letters in order find a command, as they find a file; both start \
+             their words the same, so the newer comes first"
+        );
+        assert_eq!(menu.word_start, 0, "the list is about the whole line");
+
+        input.apply(Intent::HistoryDown, &clipboard);
+        assert_eq!(input.apply(Intent::Submit, &clipboard), None);
+        assert_eq!(
+            input.editor().text(),
+            "git checkout main",
+            "in place of everything typed, and no space after a whole command"
+        );
+        assert!(!input.has_offer());
+    }
+
+    #[test]
+    fn control_r_with_nothing_that_matches_puts_nothing_up() {
+        let input = TextInput::new();
+        input.edit(|editor| editor.seed_history(vec!["ls".to_owned()]));
+        input.edit(|editor| editor.insert("zzz"));
+        assert!(!input.offer_history());
+        assert!(input.menu().is_none());
     }
 
     #[test]

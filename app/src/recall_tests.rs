@@ -180,3 +180,69 @@ fn test_a_file_grown_past_its_bound_is_cut_to_its_newest_records() {
     assert!(newest.command.starts_with(&format!("echo {} ", index - 1)));
     let _ = fs::remove_dir_all(&directory);
 }
+
+#[test]
+fn test_the_history_list_puts_what_fits_here_first_and_says_where_each_ran() {
+    let mut cargo_here = ran("cargo test", "/work/crook", 0, None);
+    cargo_here.at = 1_000;
+    let mut make_elsewhere = ran("make", "/work/other", 2, None);
+    make_elsewhere.at = 4_000;
+    let mut git_here_old = ran("git status", "/work/crook", 0, None);
+    git_here_old.at = 500;
+    let mut cargo_again = ran("cargo test", "/work/crook", 0, None);
+    cargo_again.at = 3_000;
+    let recall = Recall::in_memory(vec![git_here_old, cargo_here, make_elsewhere, cargo_again]);
+    let plain = ["ls".to_owned(), "make".to_owned(), "htop".to_owned()];
+
+    let listed = recall.listed(&plain, &here("/work/crook", None), 3_600 + 3_000);
+
+    assert_eq!(
+        listed.candidates,
+        ["cargo test", "git status", "make", "htop", "ls"],
+        "run here, newest first; then elsewhere; then the shell's own lines, \
+         newest first and once each"
+    );
+    assert_eq!(listed.descriptions[0], "here · 1h", "from its newest run");
+    assert_eq!(listed.descriptions[2], "/work/other · 43m · failed (2)");
+    assert_eq!(
+        listed.descriptions[3], "",
+        "nothing is known about a plain line"
+    );
+}
+
+#[test]
+fn test_ago_reads_in_one_unit() {
+    assert_eq!(ago(5), "now");
+    assert_eq!(ago(90), "1m");
+    assert_eq!(ago(7_200), "2h");
+    assert_eq!(ago(86_400 * 3), "3d");
+    assert_eq!(ago(86_400 * 30), "4w");
+}
+
+#[test]
+fn test_the_list_order_is_outranked_only_by_a_clearly_better_match() {
+    let mut old_commit = ran("git commit -m wip", "/work/crook", 0, None);
+    old_commit.at = 100;
+    let mut new_checkout = ran("git checkout main", "/work/crook", 0, None);
+    new_checkout.at = 200;
+    let mut cargo = ran("cargo test -p crook", "/work/crook", 0, None);
+    cargo.at = 300;
+    let recall = Recall::in_memory(vec![old_commit, new_checkout, cargo]);
+    let listed = recall.listed(&[], &here("/work/crook", None), 400);
+
+    let order: Vec<_> = listed
+        .ranked("gco")
+        .into_iter()
+        .map(|found| found.candidate)
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "git checkout main",
+            "git commit -m wip",
+            "cargo test -p crook"
+        ],
+        "`co` side by side in `commit` is not worth a week; `g` in the middle \
+         of `cargo` starts no word, and that is"
+    );
+}

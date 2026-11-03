@@ -267,7 +267,7 @@ impl TextField {
             // A composer's Ctrl-L clears the pane it is under, and this field
             // is under none. Declined, which is all it did before it meant
             // anything: a find bar over a pane passes it on to nobody.
-            Intent::ClearBlocks => return false,
+            Intent::ClearBlocks | Intent::SearchHistory => return false,
             other => other,
         };
 

@@ -3562,6 +3562,14 @@ since grown, and one it closed but for a corner:
   Enter, Right and a press on a row take the selection, Escape puts it away, and typing filters it by letters
   anywhere in a name, after the names that start with what was typed. `crook-dev --snapshot
   out.png --completion-fixture <file>` draws it without a shell to ask.
+
+  **Ctrl-R over a written line** puts the same list up with whole commands in it, filtered by
+  the whole line: the ones `recall` ranks for this pane first (run here, after what the pane just
+  ran, not failed), then the rest newest first, then the shell's own history file. Each says
+  where and when it last ran, and whether it failed. Over an empty line at a prompt Ctrl-R is
+  still the shell's — readline's search, fzf's or atuin's widget — because somebody who set one
+  up meant it, and with a line in the field the shell's search could only start over. `crook-dev
+  --snapshot out.png --history-fixture <file>` draws it from records instead of the history file.
 - **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and
   `read -s` turn echo off and read a line on the *normal* screen. With marks this is now
   handled by the rule that hides the composer: the prompt happens while a command is running,

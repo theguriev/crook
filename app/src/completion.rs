@@ -80,6 +80,10 @@ pub struct Completions {
     /// Whether the shell offered more than [`MAX_CANDIDATES`] and the rest
     /// were dropped.
     pub truncated: bool,
+    /// Whether the order the candidates came in is itself a ranking — the
+    /// history list's, best fit for the pane first — that a scattered match
+    /// should only coarsely outrank. See [`Self::ranked`].
+    pub ordered: bool,
 }
 
 impl Completions {
@@ -185,8 +189,16 @@ impl Completions {
                 ));
             }
         }
-        // Stable, so equal scores keep the shell's order.
-        scattered.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        // Stable, so equal scores keep the shell's order. An order that is a
+        // ranking already is outranked only by a clearly better match — one
+        // more of the typed letters starting a word — and not by the few
+        // points two letters side by side earn: `gco` is `git checkout` run
+        // ten minutes ago here at least as much as `git commit` run last week.
+        if self.ordered {
+            scattered.sort_by_key(|(score, _)| std::cmp::Reverse(coarse(*score)));
+        } else {
+            scattered.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
         prefixed.extend(scattered.into_iter().map(|(_, found)| found));
         prefixed
     }
@@ -270,6 +282,14 @@ fn scattered_match(candidate: &str, word: &str) -> Option<(i32, Vec<usize>)> {
     Some((score * 16 - characters.len().min(15) as i32, matched))
 }
 
+/// A [`scattered_match`] score with only its big steps kept: how many of the
+/// typed letters start a word, near enough. The score is sixteen to a point
+/// less up to fifteen for length, and a letter starting a word is worth nine
+/// points where a letter beside the last is worth five.
+fn coarse(score: i32) -> i32 {
+    (score + 15) / 16 / 8
+}
+
 /// Whether two characters are the same but for case, in any script.
 fn same_ignoring_case(one: char, other: char) -> bool {
     one == other || one.to_lowercase().eq(other.to_lowercase())
@@ -333,6 +353,7 @@ pub fn parse_answer(text: &str) -> Completions {
                 candidates,
                 descriptions,
                 truncated: true,
+                ordered: false,
             };
         }
         candidates.push(name.to_owned());
@@ -343,6 +364,7 @@ pub fn parse_answer(text: &str) -> Completions {
         candidates,
         descriptions,
         truncated: false,
+        ordered: false,
     }
 }
 
