@@ -212,6 +212,19 @@ impl Completions {
     }
 }
 
+/// Whether a space should follow `candidate` once it is the whole word: the
+/// space every shell types after a completion that left nothing to choose.
+///
+/// Not after a name that asks for more to be written onto it, which is what
+/// a shell's `nospace` marks: a directory (`src/`), an option that takes its
+/// value in the same word (`--format=`), a user before a host (`git@`), a
+/// host before a path (`server:`), a list going on (`a,`). The candidates a
+/// shell hands back carry that last character with them, so it can be read
+/// off the name rather than carried as a flag through three shells' bridges.
+pub fn closes_word(candidate: &str) -> bool {
+    !candidate.is_empty() && !candidate.ends_with(['/', '=', ':', '@', ','])
+}
+
 /// One candidate the menu shows, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match<'a> {
@@ -341,7 +354,7 @@ pub fn parse_answer(text: &str) -> Completions {
 /// a backslash left to escape whatever is typed next, and a different word
 /// from the one completed. So a run of backslashes an odd number long keeps
 /// the one blank it escapes.
-fn without_trailing_blanks(line: &str) -> &str {
+pub fn without_trailing_blanks(line: &str) -> &str {
     let trimmed = line.trim_end_matches(char::is_whitespace);
     let backslashes = trimmed.len() - trimmed.trim_end_matches('\\').len();
     match line[trimmed.len()..].chars().next() {
