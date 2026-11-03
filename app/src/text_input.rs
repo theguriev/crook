@@ -712,6 +712,15 @@ impl TextInput {
         let Some(candidate) = self.with_offer(|ranked, at| ranked[at].candidate.to_owned()) else {
             return false;
         };
+        // A command from the history is a whole line, not a word: it is run or
+        // edited next, not followed by another argument.
+        let whole = self
+            .0
+            .completion
+            .borrow()
+            .offered
+            .as_ref()
+            .is_some_and(|offer| offer.whole);
         let line = self.line_to_caret();
         let word = self.word_for(&line).len();
         self.edit(|editor| {
@@ -719,7 +728,7 @@ impl TextInput {
             editor.set_selection(Selection::new(caret - word, caret));
             editor.insert(&candidate);
         });
-        if completion::closes_word(&candidate) {
+        if !whole && completion::closes_word(&candidate) {
             self.close_word();
         }
         self.forget_completions();
