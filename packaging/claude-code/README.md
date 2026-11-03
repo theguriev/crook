@@ -15,6 +15,14 @@ copilot plugin marketplace add theguriev/crook
 copilot plugin install crook@crook
 ```
 
+Crook's Settings › Agents runs exactly these in a tab of their own when Connect is pressed, and
+each agent's update commands when Update is.
+
+Each manifest carries a `version`, which `script/release` sets to the release it cuts. Claude
+Code names its copy of the plugin by it and updates that copy only when it changes, so a person
+on a release gets that release's hooks, and the Agents page compares it with the running Crook to
+offer Update.
+
 Installing it is the agent writing its own settings, so nobody merges JSON and Crook opens no
 file it does not own. Codex holds the plugin's hooks back until they are trusted, as it does any
 hooks: it asks on its next start, or in its `/hooks`, and asks again whenever a hook's command

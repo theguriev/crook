@@ -318,6 +318,10 @@ struct Overrides {
     /// as `history.jsonl` holds one. The records stand in for the history
     /// file, which is neither read nor written.
     history_fixture: Option<String>,
+    /// What the Agents page and the hint under the header say of the agents,
+    /// for a picture of them that asks no agent anything and is the same on
+    /// every machine. See [`workspace::AgentsFixture`].
+    agents_fixture: Option<workspace::AgentsFixture>,
     /// A module to run without installing it, and to run again every time it
     /// is built.
     ///
@@ -1262,6 +1266,13 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                     .context("`--plugin-fixture` needs a path to a fixture")?;
                 overrides.fixture = Some(PathBuf::from(path));
             }
+            "--agents-fixture" => {
+                let path = args
+                    .next()
+                    .context("`--agents-fixture` needs a path to a fixture")?;
+                overrides.agents_fixture =
+                    Some(workspace::AgentsFixture::read(std::path::Path::new(&path))?);
+            }
             "--ask-fixture" => {
                 let path = args
                     .next()
@@ -1586,6 +1597,11 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
     if overrides.history_fixture.is_some() && snapshot.is_none() {
         bail!("`--history-fixture` is a history for a picture; it goes with `--snapshot`");
     }
+    // The same for agents nobody asked: a Connect pressed in a window would
+    // run commands for an agent the fixture only said was there.
+    if overrides.agents_fixture.is_some() && snapshot.is_none() {
+        bail!("`--agents-fixture` says what agents have for a picture; it goes with `--snapshot`");
+    }
 
     // A picture has no launcher. Both of these are about how a window starts
     // and what it leaves behind, and a snapshot that quietly drew its seeded
@@ -1905,6 +1921,11 @@ OPTIONS:
                        of them and the card one is answered on that is the same
                        on every machine; with --snapshot only, and opened with
                        --action crook/tabs/answer-waiting
+    --agents-fixture <PATH>
+                       Say which agents are installed and what each one's plugin
+                       list holds, from a JSON file, for a picture of the Agents
+                       page and the hint under the header that asks no agent
+                       anything; with --snapshot only
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -1928,7 +1949,7 @@ OPTIONS:
     --menu             Start with the tab options menu open
     --tab-menu         Start with the active tab's own context menu open
     --settings [PAGE]  Start with a settings tab open, on the page with this
-                       title: `appearance`, `shell`, `notifications`, `keyboard
+                       title: `appearance`, `shell`, `agents`, `notifications`, `keyboard
                        shortcuts` (quoted) or `about`, or a plugin\'s own
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it;
@@ -2416,6 +2437,9 @@ fn apply_overrides(
     if let Some(fixture) = &overrides.ask_fixture {
         fixture.seed(workspace, ctx);
     }
+    if let Some(fixture) = &overrides.agents_fixture {
+        fixture.seed(workspace, ctx);
+    }
     if let Some(name) = overrides.section.clone() {
         // By the name on the button, because that is the only name a person
         // ever sees. One nothing answers to is a line in the log and the tabs,
@@ -2737,6 +2761,10 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             if !overrides.wants_shells() {
                 seed_snapshot_tabs(workspace, ctx);
             }
+            // A picture asks no agent what it has: it would be a picture of
+            // the machine it was taken on, made by running that machine's
+            // agents.
+            workspace.hold_agent_looks();
             apply_overrides(workspace, &overrides, ctx);
         });
     });
@@ -5274,6 +5302,30 @@ mod tests {
         // A file that is not one is said at once, by name.
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let error = parse(&["--ask-fixture", manifest, "--snapshot", "asks.png"])
+            .expect_err("a manifest is no fixture");
+        assert!(format!("{error:#}").contains("Cargo.toml"), "{error:#}");
+    }
+
+    #[test]
+    fn an_agents_fixture_is_read_with_the_arguments_and_only_for_a_picture() {
+        // The file `--agents-fixture` is documented with, which has to be one.
+        let kept = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the workspace root")
+            .join("script/fixtures/agents.json");
+        let kept = kept.to_str().expect("a path in UTF-8");
+        let error = parse(&["--agents-fixture", kept]).expect_err("a window with agents");
+        assert!(format!("{error:#}").contains("--snapshot"), "{error:#}");
+
+        let Startup::Snapshot { overrides, .. } =
+            parse(&["--agents-fixture", kept, "--snapshot", "agents.png"]).expect("a picture")
+        else {
+            panic!("not a snapshot");
+        };
+        assert!(overrides.agents_fixture.is_some());
+
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let error = parse(&["--agents-fixture", manifest, "--snapshot", "agents.png"])
             .expect_err("a manifest is no fixture");
         assert!(format!("{error:#}").contains("Cargo.toml"), "{error:#}");
     }
