@@ -27133,6 +27133,21 @@ mod shells {
             // Back by another way than the first time, so that nothing
             // followed the command just run: only the directory can choose.
             run(&mut harness, "cd ..");
+            // The record of `cd ..` is made when its mark says it ended; where
+            // it left the shell comes after, with the next prompt's OSC 7, and
+            // on a slow runner a frame or more later. Until then the pane is
+            // still in `other`, and suggests what ran there.
+            let directory = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .input(pane)
+                        .and_then(crate::text_input::TextInput::context)
+                        .and_then(|context| context.directory)
+                })
+            };
+            harness.wait_for("the pane never heard it was back home", |harness| {
+                directory(harness).as_deref() == Some(home.path())
+            });
 
             type_line(&mut harness, "echo here-");
             let suggestion = harness.workspace.read(&harness.app, |workspace, _| {
