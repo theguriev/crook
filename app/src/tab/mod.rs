@@ -1104,6 +1104,57 @@ impl TabColor {
     }
 }
 
+/// The emoji a person chose for a tab, drawn at the head of its rows in
+/// place of whatever would otherwise be there — the status disc, or a
+/// plugin's mark.
+///
+/// One grapheme, kept inline so that [`TabAction`] stays `Copy`: a family
+/// joined with zero-width joiners is the longest thing a person can mean by
+/// "one emoji", and it fits in [`TabEmoji::CAPACITY`] bytes with room left.
+/// Anything longer is refused rather than cut, because a cut grapheme is a
+/// different picture or none.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct TabEmoji {
+    bytes: [u8; Self::CAPACITY],
+    len: u8,
+}
+
+impl TabEmoji {
+    /// How many bytes one fits in.
+    pub const CAPACITY: usize = 32;
+
+    /// The first grapheme of `text`, past any leading space, if there is one
+    /// and it fits.
+    ///
+    /// Only the first, so a person who pasted two emoji, or an emoji and the
+    /// space a picker put after it, gets the first rather than a refusal.
+    pub fn new(text: &str) -> Option<Self> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let grapheme = text.trim().graphemes(true).next()?;
+        if grapheme.len() > Self::CAPACITY {
+            return None;
+        }
+        let mut bytes = [0; Self::CAPACITY];
+        bytes[..grapheme.len()].copy_from_slice(grapheme.as_bytes());
+        Some(Self {
+            bytes,
+            len: grapheme.len() as u8,
+        })
+    }
+
+    /// The grapheme itself.
+    pub fn as_str(&self) -> &str {
+        // Built only from a `&str`'s whole grapheme, so always UTF-8.
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for TabEmoji {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TabEmoji").field(&self.as_str()).finish()
+    }
+}
+
 /// The name is the tab's own and does not move as focus moves inside it,
 /// because the panel's group header is what names a tab whose rows name its
 /// panes. Deriving that header from the focused pane would rewrite the heading
@@ -1132,6 +1183,11 @@ pub struct Tab {
     /// meanings in one dot — a red tab and a failed agent telling the same
     /// story with the same pixels.
     color: Option<TabColor>,
+    /// The emoji a person chose for it, if they chose one.
+    ///
+    /// A person's choice outranks a plugin's: the emoji plugin picks one per
+    /// tab by a remainder, and the whole point of choosing is to overrule it.
+    emoji: Option<TabEmoji>,
     /// The name it was opened with, which is what a rename undone returns to.
     ///
     /// Kept rather than derived, because there is nothing to derive it from: a
@@ -1162,6 +1218,7 @@ impl Tab {
             born_as: title.clone(),
             pinned: false,
             color: None,
+            emoji: None,
             panes: PaneGroup::new(title),
             group: None,
         }
@@ -1207,15 +1264,26 @@ impl Tab {
         self.color
     }
 
-    /// Puts back the pin and the colour a session file recorded.
+    /// The emoji a person chose for it.
+    pub fn emoji(&self) -> Option<TabEmoji> {
+        self.emoji
+    }
+
+    /// Puts back the pin, the colour and the emoji a session file recorded.
     ///
     /// One method for both, and only for restoring: a tab's order in the
     /// vector already came out of the file, so nothing here has to move
     /// anything — which is exactly why this must not be the way pinning
     /// happens at runtime. See [`TabStrip::toggle_pin`].
-    pub(crate) fn restore_marks(&mut self, pinned: bool, color: Option<TabColor>) {
+    pub(crate) fn restore_marks(
+        &mut self,
+        pinned: bool,
+        color: Option<TabColor>,
+        emoji: Option<TabEmoji>,
+    ) {
         self.pinned = pinned;
         self.color = color;
+        self.emoji = emoji;
     }
 
     /// The panes it holds, in render order. Never empty.
@@ -1351,6 +1419,14 @@ pub enum TabAction {
         tab: TabId,
         /// The colour, or `None` for the swatch with a line through it.
         color: Option<TabColor>,
+    },
+    /// Put a person's emoji on a tab, or take it off and let whatever drew
+    /// the mark before draw it again.
+    SetEmoji {
+        /// The tab.
+        tab: TabId,
+        /// The emoji, or `None` for the automatic one.
+        emoji: Option<TabEmoji>,
     },
     /// Close a tab, whether or not it is the active one.
     Close(TabId),
@@ -2412,6 +2488,14 @@ impl TabStrip {
             TabAction::SetColor { tab, color } => match self.get_mut(tab) {
                 Some(tab) if tab.color != color => {
                     tab.color = color;
+                    TabEffect::Changed
+                }
+                _ => TabEffect::Unchanged,
+            },
+
+            TabAction::SetEmoji { tab, emoji } => match self.get_mut(tab) {
+                Some(tab) if tab.emoji != emoji => {
+                    tab.emoji = emoji;
                     TabEffect::Changed
                 }
                 _ => TabEffect::Unchanged,

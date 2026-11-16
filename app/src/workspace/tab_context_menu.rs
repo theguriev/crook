@@ -509,6 +509,92 @@ pub(crate) fn swatch_entry(
         .finish()
 }
 
+/// A grid of emoji to give the tab, with the one in force ringed.
+///
+/// Shown under the field a person can type or paste any emoji into, for the
+/// ones most people reach for: a grid is quicker than a system picker, and
+/// the field is there for everything the grid does not hold. A cell whose
+/// text is `None` is the automatic one — the swatch with a line through it,
+/// for the same reason the colours lead with theirs.
+///
+/// `cells` is a run of `(key, emoji, chosen, action)`, wrapped at
+/// [`EMOJI_COLUMNS`] to a row.
+pub(crate) fn emoji_grid_entry(
+    workspace: &Workspace,
+    cells: Vec<(String, Option<String>, bool, WorkspaceAction)>,
+) -> Box<dyn Element> {
+    let ui = workspace.fonts().ui;
+    let mut grid = Flex::column().with_spacing(EMOJI_GAP);
+    let mut cells = cells.into_iter().peekable();
+    while cells.peek().is_some() {
+        let mut row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(EMOJI_GAP);
+        for (key, emoji, chosen, action) in cells.by_ref().take(EMOJI_COLUMNS) {
+            let state = workspace.tab_context_menu().control(&key);
+            row.add_child(
+                Hoverable::new(state, move |mouse| {
+                    let face = match &emoji {
+                        Some(emoji) => Text::new(emoji.clone(), ui, EMOJI_SIZE)
+                            .with_color(theme().text_primary)
+                            .finish(),
+                        None => Icon::new(Lucide::X, EMOJI_SIZE * 0.8)
+                            .with_color(theme().text_muted)
+                            .finish(),
+                    };
+                    let background = if mouse.is_hovered() {
+                        theme().overlay_2
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    ConstrainedBox::new(
+                        Container::new(Align::new(face).finish())
+                            .with_background_color(background)
+                            .with_border(Border::all(1.).with_border_color(if chosen {
+                                theme().text_primary
+                            } else {
+                                Color::TRANSPARENT
+                            }))
+                            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                                EMOJI_RADIUS,
+                            )))
+                            .finish(),
+                    )
+                    .with_width(EMOJI_CELL)
+                    .with_height(EMOJI_CELL)
+                    .finish()
+                })
+                .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+                .finish(),
+            );
+        }
+        grid.add_child(row.finish());
+    }
+
+    Container::new(grid.finish())
+        .with_horizontal_padding(ROW_INSET)
+        .with_vertical_padding(4.)
+        .finish()
+}
+
+/// How many emoji one row of the grid holds: eight cells and their gaps are
+/// the menu's width less its insets.
+pub(crate) const EMOJI_COLUMNS: usize = 8;
+
+/// One cell of the emoji grid, square.
+const EMOJI_CELL: f32 = 24.;
+
+/// Between two cells of it, both ways.
+const EMOJI_GAP: f32 = 2.;
+
+/// The emoji in a cell: the mark's own size less a little, so the hover
+/// ground shows round it.
+const EMOJI_SIZE: f32 = 15.;
+
+/// A cell's corner, which is a control's and not a swatch's: a grid of
+/// circles would read as a grid of colours.
+const EMOJI_RADIUS: f32 = 4.;
+
 /// Every entry, live or not, with or without a chevron.
 fn build_row(
     workspace: &Workspace,

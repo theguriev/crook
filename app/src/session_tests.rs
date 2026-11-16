@@ -1139,6 +1139,30 @@ fn test_a_group_naming_no_tab_that_came_back_is_not_created() {
 }
 
 #[test]
+fn test_a_chosen_emoji_comes_back_and_a_bad_one_reads_as_none() {
+    let mut strip = split(1);
+    strip.apply(TabAction::New);
+    let ids: Vec<crate::tab::TabId> = strip.iter().map(crate::tab::Tab::id).collect();
+    strip.apply(TabAction::SetEmoji {
+        tab: ids[0],
+        emoji: crate::tab::TabEmoji::new("\u{1f98a}"),
+    });
+
+    let mut session = Session::of(&strip, None);
+    assert_eq!(session.tabs[0].emoji.as_deref(), Some("\u{1f98a}"));
+    // A hand-edited file: more than one grapheme is the first of them, and
+    // nothing but space is no emoji rather than a refusal.
+    session.tabs[1].emoji = Some("   ".to_owned());
+
+    let restored = session.restore().expect("there was something to restore");
+    let emoji: Vec<Option<String>> = restored
+        .iter()
+        .map(|tab| tab.emoji().map(|emoji| emoji.as_str().to_owned()))
+        .collect();
+    assert_eq!(emoji, [Some("\u{1f98a}".to_owned()), None]);
+}
+
+#[test]
 fn test_a_pin_and_a_colour_come_back() {
     // The order already comes back with the list; these two are what make a
     // pinned tab *stay* at the front of its block afterwards and what draws

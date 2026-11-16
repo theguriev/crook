@@ -124,11 +124,13 @@ use crate::input_keys::Platform;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
 use crate::plugins::header::HEADER_LEFT;
 use crate::settings::StatusMarks;
-use crate::tab::{AgentStatus, GroupId, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
+use crate::tab::{
+    AgentStatus, GroupId, PaneId, Tab, TabAction, TabColor, TabEmoji, TabId, TabStrip,
+};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::tab_context_menu::{
-    entry, field_entry, inert_entry, submenu_entry, swatch_entry,
+    EMOJI_COLUMNS, emoji_grid_entry, entry, field_entry, inert_entry, submenu_entry, swatch_entry,
 };
 use crate::workspace::{
     AskAction, OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color,
@@ -279,10 +281,17 @@ enum Renaming {
     Tab,
     /// The pane whose row it was opened over.
     Pane,
+    /// The tab's emoji, which is typed into the same field as a name: one
+    /// grapheme, pasted from a system picker or chosen from the grid under it.
+    Emoji,
 }
 
 /// What a rename field says before anything is typed into it.
 const RENAME_PLACEHOLDER: &str = "name";
+
+/// What the emoji field says while it is empty, which is also what Enter on
+/// it then does.
+const EMOJI_PLACEHOLDER: &str = "paste one, or leave it empty";
 
 /// Whether a rename is being typed, and what it is about.
 ///
@@ -391,6 +400,10 @@ fn current_name(workspace: &Workspace, what: Renaming) -> Option<String> {
     Some(match what {
         Renaming::Tab => tab.name().to_owned(),
         Renaming::Pane => tab.panes().get(pane)?.title().to_owned(),
+        Renaming::Emoji => tab
+            .emoji()
+            .map(|emoji| emoji.as_str().to_owned())
+            .unwrap_or_default(),
     })
 }
 
@@ -513,6 +526,22 @@ impl Plugin for Tabs {
                     &WorkspaceAction::Tab(TabAction::SetColor { tab, color }),
                     ctx,
                 );
+            });
+        }
+
+        // The automatic emoji back, as a command: it is the one choice a
+        // person who chose one may want from the palette. The picks are bare
+        // actions — thirty-one palette rows of one emoji each would bury
+        // everything else this plugin offers.
+        host.register_command(action("no-emoji"), "Use the automatic tab emoji", {
+            let rename = self.rename.clone();
+            move |workspace, ctx| set_emoji(workspace, &rename, None, ctx)
+        });
+        for (index, pick) in EMOJI_PICKS.iter().enumerate() {
+            let rename = self.rename.clone();
+            let emoji = TabEmoji::new(pick);
+            host.register_action(action(&format!("emoji-{index}")), move |workspace, ctx| {
+                set_emoji(workspace, &rename, emoji, ctx);
             });
         }
 
@@ -749,6 +778,7 @@ impl Plugin for Tabs {
         for (name, title, what) in [
             ("rename-tab", "Rename tab", Renaming::Tab),
             ("rename-pane", "Rename pane", Renaming::Pane),
+            ("choose-emoji", "Choose tab emoji\u{2026}", Renaming::Emoji),
         ] {
             let rename = self.rename.clone();
             let field = field.clone();
@@ -810,12 +840,34 @@ impl Plugin for Tabs {
                     workspace.close_tab_context_menu(ctx);
                     return;
                 }
+                if what == Renaming::Emoji {
+                    // An emptied field is the automatic emoji back. Text that
+                    // is no one grapheme that fits changes nothing, rather
+                    // than putting half a picture on the row.
+                    let emoji = match TabEmoji::new(&typed) {
+                        Some(emoji) => Some(emoji),
+                        None if typed.is_empty() => None,
+                        None => {
+                            workspace.close_tab_context_menu(ctx);
+                            return;
+                        }
+                    };
+                    if let Some((tab, _)) = workspace.menu_target() {
+                        workspace.close_tab_context_menu(ctx);
+                        workspace.handle_action(
+                            &WorkspaceAction::Tab(TabAction::SetEmoji { tab, emoji }),
+                            ctx,
+                        );
+                    }
+                    return;
+                }
                 // An emptied field is "put back the name I started with",
                 // which is what `None` means everywhere this reaches.
                 let name = (!typed.is_empty()).then_some(typed);
                 match (what, workspace.menu_target()) {
                     (Renaming::Tab, Some((tab, _))) => workspace.rename_tab(tab, name, ctx),
                     (Renaming::Pane, Some((_, pane))) => workspace.rename_pane(pane, name, ctx),
+                    (Renaming::Emoji, _) => {}
                     (_, None) => {}
                 }
                 workspace.close_tab_context_menu(ctx);
@@ -945,6 +997,15 @@ impl Plugin for Tabs {
             &self.rename,
             &field,
         );
+        rename_entry(
+            host,
+            "choose-emoji",
+            302,
+            Renaming::Emoji,
+            &self.rename,
+            &field,
+        );
+        emoji_grid(host, 303, &self.rename);
         contribute(host, "close-tab", 400, |workspace, _| {
             workspace.menu_target().is_some()
         });
@@ -1177,7 +1238,118 @@ fn swatch_row(host: &mut Host, order: i32) {
     });
 }
 
-/// Contributes one of the two entries that can turn into a field.
+/// The emoji a person is offered in a tab's menu, after the automatic one.
+///
+/// Thirty-one, so that with the automatic one they are four rows of
+/// [`EMOJI_COLUMNS`]. Work first — what a tab is *for* — and then creatures
+/// and things to tell checkouts apart by. Every one is a single code point
+/// with an emoji presentation of its own, for the reasons the emoji plugin's
+/// table gives: no variation selector a font may ignore, no join a shaper may
+/// fail. Anything else can be typed or pasted into the field above the grid.
+pub(crate) const EMOJI_PICKS: [&str; 31] = [
+    "\u{1f680}", // rocket
+    "\u{1f41b}", // bug
+    "\u{1f525}", // fire
+    "\u{26a1}",  // high voltage
+    "\u{2728}",  // sparkles
+    "\u{1f9ea}", // test tube
+    "\u{1f527}", // wrench
+    "\u{1f4e6}", // package
+    "\u{1f4da}", // books
+    "\u{1f4dd}", // memo
+    "\u{1f3af}", // bullseye
+    "\u{1f4a1}", // light bulb
+    "\u{1f512}", // lock
+    "\u{1f310}", // globe with meridians
+    "\u{1f916}", // robot
+    "\u{1f419}", // octopus
+    "\u{1f98a}", // fox
+    "\u{1f422}", // turtle
+    "\u{1f989}", // owl
+    "\u{1f41d}", // honeybee
+    "\u{1f433}", // whale
+    "\u{1f984}", // unicorn
+    "\u{1f438}", // frog
+    "\u{1f34e}", // red apple
+    "\u{1f34b}", // lemon
+    "\u{1f95d}", // kiwi
+    "\u{1f335}", // cactus
+    "\u{1f33b}", // sunflower
+    "\u{1f344}", // mushroom
+    "\u{1f3b8}", // guitar
+    "\u{1f9e9}", // puzzle piece
+];
+
+/// Gives the menu's tab `emoji`, or the automatic one back, and closes the
+/// menu — from a cell of the grid, or from the palette.
+fn set_emoji(
+    workspace: &mut Workspace,
+    rename: &Rename,
+    emoji: Option<TabEmoji>,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let Some((tab, _)) = workspace.menu_target() else {
+        return;
+    };
+    // A cell pressed while the field above it has the keyboard: the field
+    // is given up rather than left claiming Enter for a menu that is going.
+    rename.end();
+    workspace.close_tab_context_menu(ctx);
+    workspace.handle_action(
+        &WorkspaceAction::Tab(TabAction::SetEmoji { tab, emoji }),
+        ctx,
+    );
+}
+
+/// Contributes the grid under the emoji field, while that field is showing.
+///
+/// Only then: the menu is a list of sentences, and four rows of pictures in
+/// it on every right-click would make it a picker with a menu attached.
+fn emoji_grid(host: &mut Host, order: i32, rename: &Rc<Rename>) {
+    let none = host.action(&action("no-emoji"));
+    let picks: Vec<(&'static str, Option<ActionId>)> = EMOJI_PICKS
+        .iter()
+        .enumerate()
+        .map(|(index, pick)| (*pick, host.action(&action(&format!("emoji-{index}")))))
+        .collect();
+    debug_assert_eq!((picks.len() + 1) % EMOJI_COLUMNS, 0);
+    let rename = rename.clone();
+
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "emoji-grid",
+        order,
+        move |workspace, _| {
+            if rename.what() != Some(Renaming::Emoji) {
+                return None;
+            }
+            let chosen = workspace
+                .menu_target()
+                .and_then(|(tab, _)| workspace.tabs().get(tab))
+                .map(Tab::emoji)?;
+            let mut cells = vec![(
+                "crook/tabs/no-emoji".to_owned(),
+                None,
+                chosen.is_none(),
+                WorkspaceAction::Run(none?),
+            )];
+            for (index, (pick, id)) in picks.iter().enumerate() {
+                let Some(id) = id else {
+                    continue;
+                };
+                cells.push((
+                    format!("crook/tabs/emoji-{index}"),
+                    Some((*pick).to_owned()),
+                    chosen.is_some_and(|chosen| chosen.as_str() == *pick),
+                    WorkspaceAction::Run(*id),
+                ));
+            }
+            Some(emoji_grid_entry(workspace, cells))
+        },
+    );
+}
+
+/// Contributes one of the entries that can turn into a field.
 ///
 /// The row draws itself as a label until this is what is being renamed, and as
 /// the field from then on — in place, in the column the entry was pressed in.
@@ -1199,7 +1371,11 @@ fn rename_entry(
 
     host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, _| {
         if rename.what() == Some(what) {
-            return Some(field_entry(workspace, &key, &field, RENAME_PLACEHOLDER));
+            let placeholder = match what {
+                Renaming::Emoji => EMOJI_PLACEHOLDER,
+                Renaming::Tab | Renaming::Pane => RENAME_PLACEHOLDER,
+            };
+            return Some(field_entry(workspace, &key, &field, placeholder));
         }
         // Inert while the *other* one is being typed into, rather than absent:
         // a menu that reflowed under the field a person is typing in would
@@ -1480,10 +1656,18 @@ fn manifest() -> &'static Manifest {
 /// The mark at the head of one row, with whatever is on its corner.
 pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dyn Element> {
     let host = workspace.host();
-    let taken = host
-        .rows()
-        .one(TAB_ROW_MARK, |build| build(workspace, row, app))
-        .flatten();
+    // A person's emoji first: choosing one is overruling whatever would have
+    // been drawn, a plugin's mark included, so the slot is not even asked.
+    let chosen = workspace
+        .tabs()
+        .get(row.tab)
+        .and_then(crate::tab::Tab::emoji)
+        .map(|emoji| chosen_emoji(workspace, emoji));
+    let taken = chosen.or_else(|| {
+        host.rows()
+            .one(TAB_ROW_MARK, |build| build(workspace, row, app))
+            .flatten()
+    });
     let plugin_drew_the_face = taken.is_some();
     let face = taken.unwrap_or_else(|| status_mark(workspace, row.status));
 
@@ -1517,6 +1701,24 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
         .with_height(MARK_SIZE)
         .finish()
 }
+
+/// A person's emoji, at the size a plugin's text mark is drawn at.
+///
+/// The same size and font as the emoji plugin's `Size::Body` in this slot, so
+/// a tab whose emoji was chosen sits in a list of automatic ones without
+/// standing out from them.
+fn chosen_emoji(workspace: &Workspace, emoji: TabEmoji) -> Box<dyn Element> {
+    Text::new(
+        emoji.as_str().to_owned(),
+        workspace.fonts().ui,
+        EMOJI_MARK_SIZE,
+    )
+    .with_color(theme().text_primary)
+    .finish()
+}
+
+/// What `Size::Body` is in the mark slot — see `plugins::wasm::render`.
+const EMOJI_MARK_SIZE: f32 = 16.;
 
 /// The host's own mark for a status: the disc, or the glyph the Appearance
 /// page asked for instead.

@@ -257,6 +257,11 @@ pub struct TabSnapshot {
     /// carries is not. One nothing matches reads as no colour — see
     /// [`TabColor::named`](crate::tab::TabColor::named).
     pub color: Option<String>,
+    /// The emoji a person chose for it, as the grapheme itself.
+    ///
+    /// One that is not a single short grapheme — a hand-edited file — reads
+    /// as none, the way an unknown colour does.
+    pub emoji: Option<String>,
     /// The group this tab was in, as a position in
     /// [`Session::groups`](Session::groups).
     ///
@@ -685,6 +690,7 @@ impl TabSnapshot {
             panes,
             pinned: tab.is_pinned(),
             color: tab.color().map(|color| color.name().to_owned()),
+            emoji: tab.emoji().map(|emoji| emoji.as_str().to_owned()),
             group: None,
             recency: None,
         })
@@ -721,6 +727,7 @@ impl TabSnapshot {
         tab.restore_marks(
             self.pinned,
             self.color.as_deref().and_then(crate::tab::TabColor::named),
+            self.emoji.as_deref().and_then(crate::tab::TabEmoji::new),
         );
         // Every pane made up front and put into the shape afterwards, rather
         // than split off one at a time: a split goes beside the focused pane,

@@ -3028,3 +3028,27 @@ mod nesting {
         }
     }
 }
+
+#[test]
+fn a_tab_emoji_is_one_whole_grapheme_or_none() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+    assert_eq!(
+        TabEmoji::new(family)
+            .map(|e| e.as_str().to_owned())
+            .as_deref(),
+        Some(family)
+    );
+    assert_eq!(
+        TabEmoji::new(" \u{1f989}\u{1f98a} ")
+            .map(|e| e.as_str().to_owned())
+            .as_deref(),
+        Some("\u{1f989}"),
+        "the first of two was not the one kept"
+    );
+    assert_eq!(TabEmoji::new(""), None);
+    assert_eq!(TabEmoji::new("  "), None);
+    // Longer than fits — forty combining marks on one letter — is refused
+    // rather than cut into a different picture.
+    let long = format!("a{}", "\u{301}".repeat(40));
+    assert_eq!(TabEmoji::new(&long), None);
+}
