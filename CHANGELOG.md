@@ -5,6 +5,18 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.44
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.43...v0.1.44)
+
+### Features
+
+- **tabs:** Choose a tab's emoji from its menu ([#582](https://github.com/theguriev/crook/pull/582))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.43
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.42...v0.1.43)
