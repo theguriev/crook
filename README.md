@@ -511,7 +511,11 @@ Twenty-two features, and the page that configures them:
   tab every day and a different one for the tab beside it. That is enough to give every tab a
   picture of its own, and it is what
   [github.com/theguriev/crook-emoji](https://github.com/theguriev/crook-emoji) does: an emoji
-  where the status dot was, asking for no permission at all. Beside it,
+  where the status dot was, asking for no permission at all. A tab you want a particular one
+  on is yours to choose: **Choose tab emoji…** in its menu opens a grid of thirty-one and a
+  field to paste any other into, the choice is kept with the session, and it wins over
+  whatever a plugin would have drawn there — the empty field, or the × at the head of the
+  grid, gives the tab back to the plugin. Beside it,
   [github.com/theguriev/crook-worktree](https://github.com/theguriev/crook-worktree) puts a
   branch mark on the corner of every tab whose directory is a git worktree, which it can only
   do because somebody allowed it to see which project each tab is in.
@@ -986,8 +990,8 @@ Twenty-two features, and the page that configures them:
   it writes is a file in your themes folder, in the same format as any other.
 - **A tab's own menu.** Right-click any row and it opens over that row: pin tab, mark tab as
   waiting, why this status, new group with tab, copy pane title, copy working directory, copy
-  git branch, rename tab, rename pane, close tab, close other tabs, close tabs below, close tabs
-  above, a row of colours, and — inside a repository — show changes and the worktree list, with
+  git branch, rename tab, rename pane, choose tab emoji…, close tab, close other tabs, close tabs
+  below, close tabs above, a row of colours, and — inside a repository — show changes and the worktree list, with
   Finish task and Discard task beside them on a tab in a checkout Crook made; open pull request
   and check pull request join them on a row whose agent has named one, and Answer… on a row
   whose Claude Code is asking for a permission. **Answering** is the same as the palette's

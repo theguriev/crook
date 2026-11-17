@@ -6543,6 +6543,8 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/changes/toggle",
             "crook/tabs/rename-tab",
             "crook/tabs/rename-pane",
+            "crook/tabs/choose-emoji",
+            "crook/tabs/emoji-grid",
             "crook/tabs/close-tab",
             "crook/tabs/close-other-tabs",
             "crook/tabs/close-tabs-below",
@@ -6564,7 +6566,7 @@ fn the_readme_names_every_entry_of_a_tabs_menu() {
     // title — the name the palette and the Keyboard Shortcuts page give it —
     // in the README's paragraph on the menu, in whatever case the prose puts
     // it. The row of colours has no title to look for, since each swatch is a
-    // command of its own.
+    // command of its own, and neither has the emoji grid.
     const README: &str = include_str!("../../../README.md");
     let readme = README
         .split_whitespace()
@@ -6583,8 +6585,10 @@ fn the_readme_names_every_entry_of_a_tabs_menu() {
             workspace.host().title_of(&action).map(str::to_lowercase)
         });
         let Some(title) = title else {
-            assert_eq!(
-                entry, "crook/tabs/color",
+            // The emoji grid is the same: a cell per pick, under the field
+            // "Choose tab emoji…" opens, which the README does name.
+            assert!(
+                ["crook/tabs/color", "crook/tabs/emoji-grid"].contains(&entry.as_str()),
                 "{entry} has no title to look for in the README"
             );
             continue;
@@ -40493,6 +40497,121 @@ fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
     assert!(
         tab_boxes(&scene)[0].contains_point(center(discs[0])),
         "the disc came back on the wrong row"
+    );
+}
+
+/// The emoji a person chose for `tab`, if they chose one.
+fn chosen_emoji(harness: &Harness, tab: TabId) -> Option<String> {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(tab)
+            .and_then(crate::tab::Tab::emoji)
+            .map(|emoji| emoji.as_str().to_owned())
+    })
+}
+
+/// The owl, which no plugin in these tests draws and the grid does offer.
+const OWL: &str = "\u{1f989}";
+
+#[test]
+fn a_chosen_emoji_overrules_the_mark_a_plugin_drew() {
+    // The whole point of choosing: the emoji plugin hands every tab one by a
+    // remainder, and a person who picked their own must see theirs and not
+    // the plugin's. The other row keeps the plugin's mark — choosing for one
+    // tab is not turning the plugin off.
+    let mut harness = Harness::with_marks(2);
+    let tab = harness.tab_ids()[0];
+
+    harness.dispatch_action(TabAction::SetEmoji {
+        tab,
+        emoji: crate::tab::TabEmoji::new(OWL),
+    });
+
+    let scene = harness.frame();
+    let rows = tab_boxes(&scene);
+    assert!(
+        text_where(&scene, |position| rows[0].contains_point(position)).contains(OWL),
+        "the chosen emoji is not on its row"
+    );
+    let marks = icons_in(&scene, panel_box(&scene), MARK_ICON);
+    assert_eq!(marks.len(), 1, "the plugin's mark was drawn on both rows");
+    assert!(
+        rows[1].contains_point(center(marks[0])),
+        "the plugin's mark stayed on the row whose emoji was chosen"
+    );
+}
+
+#[test]
+fn an_emoji_picked_from_the_grid_goes_on_the_tab_and_gives_the_keyboard_back() {
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.open_tab_menu_on(tab, pane);
+    assert!(
+        !tab_menu_offers(&harness.frame(), OWL),
+        "the grid was up before anyone asked to choose"
+    );
+    harness.run_command("crook/tabs/choose-emoji");
+    assert!(
+        tab_menu_offers(&harness.frame(), OWL),
+        "choosing an emoji did not put the grid in the menu"
+    );
+
+    let owl = crate::plugins::tabs::EMOJI_PICKS
+        .iter()
+        .position(|pick| *pick == OWL)
+        .expect("the owl is one of the picks");
+    harness.run_command(&format!("crook/tabs/emoji-{owl}"));
+
+    assert_eq!(chosen_emoji(&harness, tab).as_deref(), Some(OWL));
+    assert_the_shell_has_the_keyboard_again(&mut harness);
+
+    // And back to whatever draws it by itself.
+    harness.run_command("crook/tabs/no-emoji");
+    assert_eq!(chosen_emoji(&harness, tab), None);
+}
+
+#[test]
+fn an_emoji_typed_into_the_field_is_the_first_one_and_an_empty_field_clears_it() {
+    // Pasted from a system picker, which often puts a space after it, or
+    // two of them: the first grapheme is what a person meant.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/choose-emoji");
+    harness.frame();
+    harness.type_text(&format!(" {family}{OWL} "));
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the emoji field"
+    );
+    assert_eq!(
+        chosen_emoji(&harness, tab).as_deref(),
+        Some(family),
+        "a joined emoji was not kept whole, or the second one won"
+    );
+    assert!(!harness.a_popup_is_open(), "the menu stayed up after Enter");
+
+    // The field opens with the chosen one selected, so typing replaces it and
+    // deleting it is "automatic".
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/choose-emoji");
+    harness.frame();
+    harness.press("backspace", Modifiers::default(), "");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(
+        chosen_emoji(&harness, tab),
+        None,
+        "an empty field kept the emoji"
     );
 }
 
