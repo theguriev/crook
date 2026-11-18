@@ -182,6 +182,7 @@ pub(super) fn anchor(at: Option<Vector2F>) -> AnchorTo {
             offset: corner + vec2f(0., MENU_GAP),
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
         None => AnchorTo {
             parent: Corner::TopRight,
@@ -189,6 +190,7 @@ pub(super) fn anchor(at: Option<Vector2F>) -> AnchorTo {
             offset: vec2f(-CONTROL_INSET, CONTROL_OFFSET + CONTROL_SIZE + MENU_GAP),
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
     }
 }

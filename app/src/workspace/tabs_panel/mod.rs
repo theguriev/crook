@@ -470,6 +470,7 @@ fn marked_icon(icon: Lucide, color: Color) -> Box<dyn Element> {
             offset: vec2f(SECTION_MARK / 3., -SECTION_MARK / 3.),
             keep_on_screen: false,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
     );
     stack.finish()

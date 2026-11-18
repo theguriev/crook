@@ -16,6 +16,16 @@ pub enum Corner {
 }
 
 impl Corner {
+    /// The corner on the same side, at the other end top to bottom.
+    fn mirrored(self) -> Self {
+        match self {
+            Self::TopLeft => Self::BottomLeft,
+            Self::TopRight => Self::BottomRight,
+            Self::BottomLeft => Self::TopLeft,
+            Self::BottomRight => Self::TopRight,
+        }
+    }
+
     /// The offset from a box's origin to this corner of it.
     fn offset_in(self, size: Vector2F) -> Vector2F {
         match self {
@@ -72,6 +82,21 @@ pub struct AnchorTo {
     /// clear of the parent on: a child that overlapped its parent to begin
     /// with is left where it is.
     pub keep_clear_of_parent: bool,
+
+    /// Whether a child that does not fit on its side of the parent is hung
+    /// off the other side instead, when it fits there.
+    ///
+    /// Up and down only, which is the axis a menu runs out of. A menu hung
+    /// below a row near the foot of the window used to be slid up until it
+    /// fitted — over the row it was opened on, and over the rows above that,
+    /// so the thing a person had just pressed was gone under what it opened.
+    /// Hung above the row instead it covers none of them, which is what every
+    /// desktop's context menu does there.
+    ///
+    /// Only when the other side has room for all of it: where neither does,
+    /// the slide is still the answer, since a menu cut short to stay off its
+    /// row is a menu whose last entries are behind a scroll.
+    pub flip_to_fit: bool,
 }
 
 impl AnchorTo {
@@ -83,18 +108,22 @@ impl AnchorTo {
             offset,
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         }
     }
 
     /// Where a `child`-sized box goes, given the `parent` box it hangs off and
     /// the window it must stay inside.
     pub(super) fn place(self, child: Vector2F, parent: RectF, window: Vector2F) -> Vector2F {
-        let anchored = parent.origin() + self.parent.offset_in(parent.size())
-            - self.child.offset_in(child)
-            + self.offset;
+        let anchored = self.anchored(child, parent);
+        let anchored = if self.flip_to_fit {
+            self.flipped_if_short(anchored, child, parent, window)
+        } else {
+            anchored
+        };
 
         let origin = if self.keep_on_screen {
-            // Slid, not flipped: a menu that overhangs the right edge moves
+            // Slid, unless it was flipped above: a menu that overhangs the right edge moves
             // left until it fits, with [`WINDOW_INSET`] of air left beyond it,
             // and one larger than the window starts at the inset rather than
             // at a negative coordinate.
@@ -108,6 +137,45 @@ impl AnchorTo {
             self.push_clear(origin, anchored, child, parent)
         } else {
             origin
+        }
+    }
+
+    /// Where the anchor puts a `child`-sized box against `parent`, before
+    /// anything keeps it on screen.
+    fn anchored(self, child: Vector2F, parent: RectF) -> Vector2F {
+        parent.origin() + self.parent.offset_in(parent.size()) - self.child.offset_in(child)
+            + self.offset
+    }
+
+    /// `anchored`, or the same anchor mirrored top for bottom when `anchored`
+    /// runs past the window's lower or upper inset and the mirror does not.
+    /// See [`Self::flip_to_fit`].
+    ///
+    /// The mirror swaps which edge of the parent and of the child meet and
+    /// turns the vertical gap round, so a menu 4 below a row becomes a menu
+    /// 4 above it, its bottom edge on the row's top.
+    fn flipped_if_short(
+        self,
+        anchored: Vector2F,
+        child: Vector2F,
+        parent: RectF,
+        window: Vector2F,
+    ) -> Vector2F {
+        let fits = |top: f32| top >= WINDOW_INSET && top + child.y() <= window.y() - WINDOW_INSET;
+        if fits(anchored.y()) {
+            return anchored;
+        }
+        let mirrored = Self {
+            parent: self.parent.mirrored(),
+            child: self.child.mirrored(),
+            offset: vec2f(self.offset.x(), -self.offset.y()),
+            ..self
+        }
+        .anchored(child, parent);
+        if fits(mirrored.y()) {
+            mirrored
+        } else {
+            anchored
         }
     }
 
@@ -195,6 +263,7 @@ mod tests {
             offset: vec2f(12., 0.),
             keep_on_screen: true,
             keep_clear_of_parent: true,
+            flip_to_fit: false,
         };
 
         assert_eq!(
@@ -205,6 +274,7 @@ mod tests {
         assert_eq!(
             AnchorTo {
                 keep_clear_of_parent: false,
+                flip_to_fit: false,
                 ..anchor
             }
             .place(vec2f(80., 20.), BUTTON, vec2f(100., 200.)),
@@ -236,6 +306,53 @@ mod tests {
             vec2f(20. - WINDOW_INSET, 42.),
             "an overhanging child slides left by its overhang and the inset"
         );
+    }
+
+    #[test]
+    fn a_child_short_of_room_below_is_hung_above_when_it_fits_there() {
+        // A menu opened on a row near the foot of the window was slid up
+        // until it fitted, over the row it was opened on. Hung above the
+        // row, it covers none of it.
+        let anchor = AnchorTo {
+            flip_to_fit: true,
+            ..AnchorTo::below(vec2f(0., 4.))
+        };
+        let low = RectF::new(vec2f(40., 300.), vec2f(20., 28.));
+        let window = vec2f(400., 400.);
+
+        let placed = anchor.place(vec2f(80., 200.), low, window);
+        assert_eq!(
+            placed,
+            vec2f(40., 300. - 4. - 200.),
+            "the menu's bottom is not 4 above the row's top"
+        );
+        assert!(placed.y() + 200. <= low.min_y(), "it covers the row");
+
+        // Without the rule it slides, over the row: the default.
+        let slid = AnchorTo::below(vec2f(0., 4.)).place(vec2f(80., 200.), low, window);
+        assert_eq!(slid.y() + 200., 400. - WINDOW_INSET);
+        assert!(slid.y() < low.max_y(), "{slid:?}");
+    }
+
+    #[test]
+    fn a_child_that_fits_below_stays_below_and_one_that_fits_nowhere_slides() {
+        let anchor = AnchorTo {
+            flip_to_fit: true,
+            ..AnchorTo::below(vec2f(0., 4.))
+        };
+        let window = vec2f(400., 400.);
+
+        // Room below: below, as it always was, even with more room above.
+        let low = RectF::new(vec2f(40., 300.), vec2f(20., 28.));
+        assert_eq!(anchor.place(vec2f(80., 40.), low, window), vec2f(40., 332.));
+
+        // Too tall for either side of a row in the middle: slid to fit the
+        // window, as without the rule, rather than hung off the far side and
+        // cut by the window's edge.
+        let middle = RectF::new(vec2f(40., 180.), vec2f(20., 28.));
+        let placed = anchor.place(vec2f(80., 300.), middle, window);
+        assert_eq!(placed.y() + 300., 400. - WINDOW_INSET, "{placed:?}");
+        assert!(placed.y() >= WINDOW_INSET, "{placed:?}");
     }
 
     #[test]

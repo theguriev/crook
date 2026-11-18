@@ -996,6 +996,7 @@ const OVER_THE_STACK: AnchorTo = AnchorTo {
     offset: vec2f(10., 10.),
     keep_on_screen: false,
     keep_clear_of_parent: false,
+    flip_to_fit: false,
 };
 
 #[test]
@@ -1113,6 +1114,7 @@ fn a_child_anchored_within_its_stack_is_laid_out_against_the_stack_not_the_windo
                 offset: vec2f(-10., 10.),
                 keep_on_screen: true,
                 keep_clear_of_parent: false,
+                flip_to_fit: false,
             },
         );
         ConstrainedBox::new(stack.finish())

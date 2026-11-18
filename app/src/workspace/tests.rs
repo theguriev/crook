@@ -5361,6 +5361,39 @@ fn the_tab_context_menu_fits_a_window_shorter_than_it_and_walks_to_its_last_row(
 }
 
 #[test]
+fn the_tab_context_menu_opens_above_a_row_too_near_the_foot_of_the_window() {
+    // Hung below its row and slid up to fit, a menu opened on one of the
+    // last rows covered that row and the rows above it: the thing a person
+    // had just pressed was gone under what it opened. With room above the
+    // row for all of it, it hangs there instead.
+    let mut harness = Harness::new(14);
+    let window = vec2f(480., 900.);
+    let tab = *harness.tab_ids().last().expect("a tab");
+    let pane = harness.panes_of(tab)[0];
+    harness.dispatch_workspace_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));
+    let scene = harness.frame_sized(window);
+    let last = *selected_panel_rows(&scene)
+        .first()
+        .expect("the last tab's row is not drawn selected");
+    harness.open_tab_menu_on(tab, pane);
+
+    let scene = harness.frame_sized(window);
+    let popup = tab_menu_box(&scene).expect("the menu is not up");
+    assert!(
+        last.max_y() + 4. + popup.height() > window.y() - crookui_core::elements::WINDOW_INSET,
+        "the menu at {popup:?} would have fitted below the row at {last:?}: this tests nothing"
+    );
+    assert!(
+        popup.max_y() <= last.min_y() + 0.5,
+        "the menu at {popup:?} covers the row at {last:?} it was opened on"
+    );
+    assert!(
+        popup.min_y() >= crookui_core::elements::WINDOW_INSET - 0.5,
+        "the menu at {popup:?} runs past the top of the window"
+    );
+}
+
+#[test]
 fn the_options_menu_fits_a_window_shorter_than_it_and_scrolls_to_its_last_row() {
     // The popup was as tall as its rows, and the anchor slides a popup on
     // screen but cannot make it fit: in a window shorter than the menu the
