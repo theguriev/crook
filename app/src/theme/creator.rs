@@ -403,7 +403,7 @@ const BRIGHT_STEP: f32 = 0.05;
 /// the way. Otherwise the other side, which can — of black and white one is
 /// always at least 4.58:1 against any colour, the square root of 21.
 fn lightens(color: Color, background: Color) -> bool {
-    let above = relative_luminance(color) >= relative_luminance(background);
+    let above = super::relative_luminance(color) >= super::relative_luminance(background);
     let reaches = |lighter: bool| {
         let end = if lighter { Color::WHITE } else { Color::BLACK };
         contrast(end, background) >= TEXT_CONTRAST
