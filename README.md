@@ -444,9 +444,8 @@ Twenty-two features, and the page that configures them:
   agent in one of them is running or waiting on you, or its shell is running a command, a card
   says how many, names up to three, and offers **End them and quit** (or **End them and close**)
   beside **Cancel**. Cancel is the default: Enter and Escape both press it, and so does a click
-  anywhere off the card. Tab or the arrow keys move to the other button, and Enter or Space then
-  presses whichever is filled — once the keyboard has been still for a second, so a Tab and a
-  Space typed on after a stray close cannot end anything. While the card is up the pane under it
+  anywhere off the card. Tab or the arrow keys move to the other button at once, and Enter or
+  Space then presses whichever is filled. While the card is up the pane under it
   hears no keys at all, so a `ctrl-c` meant for the card cannot interrupt the agent it is asking
   about. A window close that asks restores a minimised window and, if the window is not the one
   being typed in, asks the desktop for attention rather than taking the keyboard: a flashing

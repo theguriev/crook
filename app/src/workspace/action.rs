@@ -330,15 +330,6 @@ pub enum EndingAction {
     /// Put the keyboard on one of the two buttons, so that Enter and Space
     /// press it. Tab and the arrow keys.
     Choose(EndingButton),
-    /// Nothing: a key that would have moved the keyboard or pressed End,
-    /// typed before the keyboard had been still long enough for the card to
-    /// have been read.
-    ///
-    /// Something is returned all the same, for the reason
-    /// [`WorkspaceAction::Chord`] is: a keystroke the window has no action
-    /// for goes on to whatever is under the card, and a Tab the card held
-    /// back must not reach a palette under it instead.
-    TooSoon,
 }
 
 /// One of the two buttons on the question a close asks.

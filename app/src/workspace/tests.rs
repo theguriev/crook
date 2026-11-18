@@ -1836,17 +1836,6 @@ impl Harness {
         self.click(at + vec2f(2., -3.), MouseButton::Left);
     }
 
-    /// Lets the keyboard reach the question's End, as a second of it lying
-    /// still would.
-    fn settle_the_question(&self) {
-        self.workspace.read(&self.app, |workspace, _| {
-            workspace
-                .closing_question()
-                .expect("a question is up to settle")
-                .settle();
-        });
-    }
-
     /// The question's button the keyboard is on, while it is up.
     fn closing_keyboard_on(&self) -> Option<EndingButton> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3068,10 +3057,6 @@ fn the_keyboard_alone_can_end_them_once_it_has_moved_off_cancel() {
     assert!(closing_button_is_filled(&scene, "Cancel"));
     assert!(!closing_button_is_filled(&scene, "End it and close"));
 
-    // Once the card has had its moment to be read: a Tab typed straight on
-    // after the close is not a person answering it — see the next test.
-    harness.settle_the_question();
-
     // Tab and Shift-Tab go back and forth; the arrows go the way the buttons
     // sit, the one that ends them on the left.
     let shift = Modifiers {
@@ -3112,6 +3097,65 @@ fn the_keyboard_alone_can_end_them_once_it_has_moved_off_cancel() {
 }
 
 #[test]
+fn the_keyboard_reaches_the_question_the_moment_it_is_up() {
+    // It used to hold Tab and the arrows until the keyboard had been still
+    // for a second, and every key inside that second started it again: a
+    // person pressing ← straight away, and again, was never let through
+    // until they reached for the pointer, and the card read as one that had
+    // not got the keyboard. Nothing waits now — not after the card comes up,
+    // not after the window takes the keyboard, not after a letter.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    harness.update_session(panes[1], |session| {
+        session.running_command = Some("ssh box".to_owned());
+    });
+
+    assert!(harness.press_key("w", close_chord()));
+    harness.press("a", Modifiers::default(), "a");
+    harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
+    assert!(harness.press_key("left", Modifiers::default()));
+    assert_eq!(
+        harness.closing_keyboard_on(),
+        Some(EndingButton::End),
+        "a key pressed straight after the card came up did not move the keyboard"
+    );
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::Cancel));
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.active_pane_ids(), [panes[0]]);
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn enter_straight_after_a_close_is_still_cancel() {
+    // What is left against a stray close: the keyboard starts on Cancel, so
+    // the Enter that follows a word typed on ends nothing.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    harness.update_session(panes[1], |session| {
+        session.running_command = Some("ssh box".to_owned());
+    });
+
+    assert!(harness.press_key("w", close_chord()));
+    for (key, chars) in [("l", "l"), ("s", "s"), ("enter", "\r")] {
+        harness.press(key, Modifiers::default(), chars);
+    }
+    assert_eq!(
+        harness.active_pane_ids(),
+        panes,
+        "the Enter ended the ssh session"
+    );
+    assert_eq!(
+        harness.asking_about(),
+        None,
+        "the Enter left the question up"
+    );
+}
+
+#[test]
 fn a_second_close_asks_again_with_the_keyboard_back_on_cancel() {
     // The latest close is what the card is about, and a card that came up
     // with the keyboard already on "End" would be one Enter from ending
@@ -3123,7 +3167,6 @@ fn a_second_close_asks_again_with_the_keyboard_back_on_cancel() {
     }
 
     harness.dispatch_action(TabAction::Close(tabs[0]));
-    harness.settle_the_question();
     assert!(harness.press_key("tab", Modifiers::default()));
     assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
 
@@ -3132,116 +3175,6 @@ fn a_second_close_asks_again_with_the_keyboard_back_on_cancel() {
     assert!(harness.press_key("enter", Modifiers::default()));
     assert_eq!(harness.quit_requests(), 0);
     assert_eq!(harness.tab_ids(), tabs);
-}
-
-#[test]
-fn keys_typed_on_after_the_question_comes_up_cannot_end_anything() {
-    // A close chord pressed by mistake mid-word, and the hands carry on:
-    // Tab is every shell's completion key, and a Space or an Enter is what
-    // follows one. Typed straight on, they must not be a way to End.
-    let mut harness = Harness::new(1);
-    harness.dispatch_action(TabAction::Split(Direction::Right));
-    let panes = harness.active_pane_ids();
-    harness.update_session(panes[1], |session| {
-        session.running_command = Some("ssh box".to_owned());
-    });
-
-    for typed in [
-        [("l", "l"), ("o", "o"), ("tab", "\t"), ("space", " ")],
-        [("x", "x"), ("y", "y"), ("tab", "\t"), ("enter", "\r")],
-    ] {
-        assert!(harness.press_key("w", close_chord()));
-        assert_eq!(harness.asking_about(), Some(vec![panes[1]]));
-        for (key, chars) in typed {
-            harness.press(key, Modifiers::default(), chars);
-        }
-        assert_eq!(
-            harness.active_pane_ids(),
-            panes,
-            "{typed:?} typed on after the close ended the ssh session"
-        );
-    }
-}
-
-#[test]
-fn a_key_typed_at_something_else_keeps_the_way_to_end_shut() {
-    // Somebody still typing a second on — a long path, no space in it —
-    // has not read the card either, and the letters are what say so. A
-    // modifier on its own is not typing: Shift is how Shift-Tab is reached.
-    let mut harness = Harness::new(1);
-    harness.dispatch_action(TabAction::Split(Direction::Right));
-    let panes = harness.active_pane_ids();
-    harness.update_session(panes[1], |session| {
-        session.running_command = Some("ssh box".to_owned());
-    });
-    assert!(harness.press_key("w", close_chord()));
-    harness.settle_the_question();
-
-    harness.press("a", Modifiers::default(), "a");
-    assert!(
-        harness.press_key("tab", Modifiers::default()),
-        "a Tab held back reached whatever was under the card"
-    );
-    assert_eq!(
-        harness.closing_keyboard_on(),
-        Some(EndingButton::Cancel),
-        "a Tab straight after a letter moved the keyboard onto End"
-    );
-    assert!(harness.press_key("left", Modifiers::default()));
-    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::Cancel));
-
-    harness.settle_the_question();
-    let shift = Modifiers {
-        shift: true,
-        ..Modifiers::default()
-    };
-    harness.press("shift", shift, "");
-    assert!(harness.press_key("tab", shift));
-    assert_eq!(
-        harness.closing_keyboard_on(),
-        Some(EndingButton::End),
-        "Shift on its way to Shift-Tab was taken for typing"
-    );
-    assert!(harness.press_key("space", Modifiers::default()));
-    assert_eq!(harness.active_pane_ids(), [panes[0]]);
-    assert_eq!(harness.asking_about(), None);
-}
-
-#[test]
-fn the_window_taking_the_keyboard_keeps_the_way_to_end_shut_a_moment() {
-    // A desktop that answers a close's request for attention by focusing
-    // the window does it in the middle of whatever somebody was typing
-    // elsewhere, and the rest of it lands here.
-    let mut harness = Harness::new(2);
-    let tabs = harness.tab_ids();
-    let working = harness.panes_of(tabs[0])[0];
-    harness.update_session(working, |session| session.status = AgentStatus::Running);
-    harness.dispatch_action(TabAction::Close(tabs[0]));
-    harness.settle_the_question();
-
-    harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
-    assert!(harness.press_key("tab", Modifiers::default()));
-    assert_eq!(
-        harness.closing_keyboard_on(),
-        Some(EndingButton::Cancel),
-        "a Tab just after the window took the keyboard moved it onto End"
-    );
-
-    harness.settle_the_question();
-    assert!(harness.press_key("tab", Modifiers::default()));
-    assert_eq!(harness.closing_keyboard_on(), Some(EndingButton::End));
-    harness.workspace_update(|workspace, ctx| workspace.window_focused(ctx));
-    assert!(harness.press_key("enter", Modifiers::default()));
-    assert_eq!(
-        harness.tab_ids(),
-        tabs,
-        "an Enter just after the window took the keyboard pressed End"
-    );
-    assert_eq!(harness.asking_about(), Some(vec![working]));
-
-    harness.settle_the_question();
-    assert!(harness.press_key("enter", Modifiers::default()));
-    assert_eq!(harness.tab_ids(), [tabs[1]]);
 }
 
 #[test]
