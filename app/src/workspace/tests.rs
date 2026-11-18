@@ -16647,8 +16647,34 @@ fn card_says(scene: &Scene, phrase: &str) -> bool {
 fn closing_button_is_filled(scene: &Scene, label: &str) -> bool {
     let at = word_in(scene, RectF::new(Vector2F::zero(), WINDOW), label) + vec2f(2., -3.);
     visible_rects(scene).any(|(rect, bounds)| {
-        rect.background == Fill::Solid(theme().accent) && bounds.contains_point(at)
+        rect.background == Fill::Solid(theme().accent_fill()) && bounds.contains_point(at)
     })
+}
+
+/// The contrast the label `label` is drawn at against the fill under it, as
+/// the frame drew both.
+///
+/// Read out of the scene rather than out of the theme, so that what is
+/// measured is the colour the button's text was given and the colour of the
+/// last opaque rect painted under its first glyph — which is what a person
+/// sees, whatever the code meant either of them to be.
+fn label_contrast(scene: &Scene, label: &str) -> f32 {
+    let at = word_in(scene, RectF::new(Vector2F::zero(), WINDOW), label);
+    let ink = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .find(|glyph| glyph.position.x() == at.x() && glyph.position.y().round() == at.y())
+        .map(|glyph| glyph.color)
+        .unwrap_or_else(|| panic!("no glyph starts {label:?}"));
+    let inside = at + vec2f(2., -3.);
+    let fill = visible_rects(scene)
+        .filter_map(|(rect, bounds)| match rect.background {
+            Fill::Solid(color) if color.a == 255 && bounds.contains_point(inside) => Some(color),
+            _ => None,
+        })
+        .last()
+        .unwrap_or_else(|| panic!("nothing is painted under {label:?}"));
+    crate::theme::creator::contrast(ink, fill)
 }
 
 /// Whether the frame says `phrase`, wherever the paragraph wrapped.
@@ -17020,6 +17046,45 @@ fn a_chord_still_reaches_the_window_while_the_panel_is_up() {
         harness.is_theme_panel_open(),
         "opening a tab closed the panel"
     );
+}
+
+#[test]
+fn the_label_on_an_accent_filled_button_reads_in_every_builtin_palette() {
+    // The creator's "Create" and the close question's chosen button are both
+    // filled in the accent, and both used to be labelled in the palette's own
+    // text: 2.6:1 in Crook Light, 3.5:1 in Crook Dark, and in a bundled
+    // palette whose text and accent are both light, about 1:1 — a button
+    // whose word was not there. WCAG asks 4.5:1 of text this size, and that
+    // is what the frame has to show, in every palette that ships.
+    for builtin in crate::theme::BUILTIN {
+        let _guard = crate::theme::ThemeGuard::new(builtin.theme);
+
+        let mut harness = Harness::new(1);
+        harness.open_theme_panel();
+        harness.start_creating();
+        let ratio = label_contrast(&harness.frame(), "Create");
+        assert!(
+            ratio >= crate::theme::TEXT_CONTRAST,
+            "{}: the creator's Create is {ratio:.2}:1 on its fill",
+            builtin.name
+        );
+
+        let mut harness = Harness::new(1);
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let panes = harness.active_pane_ids();
+        harness.update_session(panes[1], |session| {
+            session.running_command = Some("ssh box".to_owned());
+        });
+        assert!(harness.press_key("w", close_chord()));
+        let scene = harness.frame();
+        assert!(closing_button_is_filled(&scene, "Cancel"));
+        let ratio = label_contrast(&scene, "Cancel");
+        assert!(
+            ratio >= crate::theme::TEXT_CONTRAST,
+            "{}: the close question's Cancel is {ratio:.2}:1 on its fill",
+            builtin.name
+        );
+    }
 }
 
 #[test]

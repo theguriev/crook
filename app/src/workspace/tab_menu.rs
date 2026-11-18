@@ -2604,21 +2604,27 @@ pub(super) fn button(
         // An inert button takes the quiet ground rather than the accent, and
         // its own hover does nothing: a filled primary button that answers the
         // pointer and not the press is a control that looks broken.
+        //
+        // A primary button is filled in `accent_fill` and labelled in the
+        // ink that reads on it, rather than in the accent and the palette's
+        // text: that pair was 2.6:1 in Crook Light, and in some of the
+        // bundled palettes all but the same colour twice.
         let (background, border) = match (primary && !inert, mouse.is_hovered() && !inert) {
-            (true, false) => (theme().accent, theme().accent),
-            (true, true) => (theme().accent, theme().text_primary),
+            (true, false) => (theme().accent_fill(), theme().accent_fill()),
+            (true, true) => (theme().accent_fill(), theme().text_primary),
             (false, false) => (Color::TRANSPARENT, theme().border),
             (false, true) => (theme().overlay_2, theme().border),
+        };
+        let ink = match (inert, primary) {
+            (true, _) => theme().text_muted,
+            (false, true) => theme().on_accent_text(),
+            (false, false) => theme().text_primary,
         };
 
         Container::new(
             Align::new(
                 Text::new(label.clone(), ui, crate::style::text::CAPTION)
-                    .with_color(if inert {
-                        theme().text_muted
-                    } else {
-                        theme().text_primary
-                    })
+                    .with_color(ink)
                     .finish(),
             )
             .finish(),
