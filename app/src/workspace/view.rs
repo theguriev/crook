@@ -12695,6 +12695,16 @@ impl Workspace {
                     focus.first_control();
                 }
             }
+            // A row that is pressed rather than chosen — the Plugins list's
+            // fold, its link to the Store — is pressed by Enter and Space and
+            // by nothing else: arriving on it with an arrow only stands on
+            // it. See `Stop::list_press`.
+            (Place::Rail, SettingsKey::Press) if focus.row_press().is_some() => {
+                if let Some(press) = focus.row_press() {
+                    self.handle_action(&press, ctx);
+                    focus.changed();
+                }
+            }
             // On the settings' rail Enter and Right go into the page, as they
             // did; their controls are preferences. On a list of plugins or
             // offers they do nothing: the row is chosen already, and the card

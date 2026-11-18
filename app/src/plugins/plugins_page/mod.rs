@@ -211,6 +211,21 @@ fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
             return;
         };
         showing.select(&plugin);
+        // A built-in asked for by name — from the palette, a card's link,
+        // `--action` — opens the fold it is in, so the row the card is about
+        // is a row on screen. The page would open it anyway when it next
+        // draws; this says so where the choice is made.
+        if is_built_in(plugin.as_str()) {
+            showing.set_built_in_open(true, is_built_in);
+        }
+        ctx.notify();
+    });
+
+    // The fold, one action with nothing to be about, so a click on it and
+    // Enter on it are the one dispatch.
+    let folding = state.clone();
+    host.register_action(about("fold"), move |_, ctx| {
+        folding.set_built_in_open(!folding.built_in_open(), is_built_in);
         ctx.notify();
     });
 
@@ -333,7 +348,32 @@ fn page(
     state: &Rc<PluginsState>,
 ) -> (Box<dyn Element>, Box<dyn Element>) {
     let matching = list::matching(workspace);
-    let selected = state.showing(&matching);
+    let searching = list::is_searching(workspace);
+    let (built_in, installed): (Vec<&'static Manifest>, Vec<&'static Manifest>) = matching
+        .into_iter()
+        .partition(|manifest| is_built_in(manifest.id.as_str()));
+
+    // A built-in that was chosen opens the fold it is in, however it was
+    // chosen: the row the card is about has to be a row on screen. The
+    // `show` action does this too; this is the rule for every other way a
+    // choice can arrive, said once where the list is drawn.
+    if !searching
+        && state
+            .chosen()
+            .is_some_and(|key| built_in.iter().any(|manifest| manifest.id.as_str() == key))
+    {
+        state.set_built_in_open(true, is_built_in);
+    }
+    // A search looks through both groups: a person who types "palette" is
+    // asking for the row whatever group it is in, and a match hidden in a
+    // shut fold would read as no match at all.
+    let open = searching || state.built_in_open();
+    let shown: Vec<&'static Manifest> = match open {
+        true => installed.iter().chain(&built_in).copied().collect(),
+        false => installed.clone(),
+    };
+
+    let selected = state.showing(&shown);
     let showing = selected.as_ref().and_then(|id| {
         workspace
             .host()
@@ -343,10 +383,22 @@ fn page(
             .copied()
     });
 
-    let list = list::render(workspace, &matching, selected.as_ref(), state);
-    // Unreachable while any plugin is loaded, and this page is one.
+    let list = list::render(
+        workspace,
+        list::Groups {
+            installed: &installed,
+            built_in: &built_in,
+            open,
+            searching,
+        },
+        selected.as_ref(),
+        state,
+    );
+    // Nothing on screen to be about: nothing is installed and the built-in
+    // ones are folded away. The card side says what the list is, rather
+    // than describing a row the person cannot see.
     let Some(manifest) = showing else {
-        return (list, Empty::new().finish());
+        return (list, nothing_chosen(workspace));
     };
 
     // The face beside the name, for a plugin that has one — a picture it
@@ -372,6 +424,47 @@ fn page(
             workspace.fonts().ui,
         ),
     )
+}
+
+/// What the card side says when the list shows no plugin to be about.
+///
+/// Under the page's own title, in the frame every card is drawn in, so the
+/// half of the window beside the list is not a hole. The list beside it holds
+/// the way to the Store; this says what the list will hold.
+fn nothing_chosen(workspace: &Workspace) -> Box<dyn Element> {
+    let ui = workspace.fonts().ui;
+    section::content(
+        &workspace.settings_page().focus_of(list::SECTION),
+        None,
+        "Plugins",
+        None,
+        widgets::note_text(
+            "What you add from the Store is listed here first, with its card beside it. \
+             The modules Crook is made of are folded under Built in.",
+            ui,
+        ),
+        workspace.settings_page().scroll_named(CARD_SCROLL),
+        ui,
+    )
+}
+
+/// Whether the plugin `id` is one of those the binary is built from.
+///
+/// [`plugins::is_builtin`](crate::plugins::is_builtin) is the rule, and it
+/// builds every default plugin to ask it; the list asks it once per row per
+/// frame, so the answer is worked out once and kept. A fixture or a module
+/// being written is not one of them, which is right: either is a stand-in for
+/// a plugin somebody installed.
+pub(super) fn is_built_in(id: &str) -> bool {
+    static IDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        crate::plugins::defaults()
+            .iter()
+            .map(|plugin| plugin.manifest().id.to_string())
+            .collect()
+    })
+    .iter()
+    .any(|known| known == id)
 }
 
 /// What one of this page's actions about a plugin is called.

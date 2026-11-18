@@ -12,7 +12,7 @@
 //! because six screenshots of pixels are a thing to hold for one card and not
 //! for every plugin in the list.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crook_plugin::{Manifest, PluginId};
 
@@ -45,6 +45,14 @@ pub(super) struct PluginsState {
     /// The previews somebody asked to see, decoded, with their captions —
     /// one plugin's, and the plugin they belong to.
     pictures: RefCell<Option<(String, Decoded)>>,
+    /// Whether the list's fold of built-in plugins is open.
+    ///
+    /// Shut when a window opens, and held for as long as it is open and no
+    /// longer: it is where somebody happened to leave a list, which is not a
+    /// preference, and a settings file that recorded it would rewrite itself
+    /// on a click that changed nothing — the reason the settings page's own
+    /// choice of page is not kept either.
+    built_in_open: Cell<bool>,
 }
 
 impl PluginsState {
@@ -55,7 +63,36 @@ impl PluginsState {
             said: RefCell::new(None),
             opening: RefCell::new(None),
             pictures: RefCell::new(None),
+            built_in_open: Cell::new(false),
         }
+    }
+
+    /// Whether the fold of built-in plugins is open.
+    pub(super) fn built_in_open(&self) -> bool {
+        self.built_in_open.get()
+    }
+
+    /// Opens or shuts the fold of built-in plugins.
+    ///
+    /// Shutting it over the row the card is about lets go of the choice, so
+    /// the card falls to the first row the list still shows: a card about a
+    /// row folded out of sight is a card about something nobody can see,
+    /// which is the rule [`Self::showing`] keeps for a row filtered away.
+    pub(super) fn set_built_in_open(&self, open: bool, built_in: impl Fn(&str) -> bool) {
+        self.built_in_open.set(open);
+        if open {
+            return;
+        }
+        let mut selected = self.selected.borrow_mut();
+        if selected.as_deref().is_some_and(built_in) {
+            *selected = None;
+        }
+    }
+
+    /// The plugin somebody chose, by `owner/name`, whether or not the list is
+    /// showing it.
+    pub(super) fn chosen(&self) -> Option<String> {
+        self.selected.borrow().clone()
     }
 
     /// Chooses one.

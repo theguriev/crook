@@ -1135,6 +1135,30 @@ impl Harness {
     ///
     /// [`reveal_line`]: Self::reveal_line
     fn click_plugin(&mut self, name: &str) {
+        // A built-in plugin is under a fold that a window opens shut, so a
+        // row that is not on the list is looked for again with it open.
+        let at = self.plugin_line(name).or_else(|| {
+            self.open_built_in_plugins();
+            self.plugin_line(name)
+        });
+        let at = at.unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+        self.click(at + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Presses the Plugins list's fold of built-in plugins, the way a click
+    /// on it does — which opens it from shut, the state a window starts in.
+    fn open_built_in_plugins(&mut self) {
+        let at = self
+            .plugin_line("Built in")
+            .expect("the fold is on the list");
+        self.click(at + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Where the Plugins list draws the row whose line is, or starts with,
+    /// `name`, scrolled into sight first.
+    fn plugin_line(&mut self, name: &str) -> Option<Vector2F> {
         let (_, at) = self.reveal_line(WINDOW, |scene| {
             // The column the list is in, taken from its own field: the card is
             // to the right of it and shares baselines with it, so a line built
@@ -1157,9 +1181,7 @@ impl Harness {
                 .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
                 .map(|(at, _)| *at)
         });
-        let at = at.unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
-        self.click(at + vec2f(4., 4.), MouseButton::Left);
-        self.frame();
+        at
     }
 
     /// Turns the wheel until the line `find` picks out of a frame is inside
@@ -7520,6 +7542,110 @@ fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
     assert!(
         tab_menu_offers(&harness.frame(), "Mark as waiting"),
         "a row the agent alone is holding was offered a clear with nothing to clear"
+    );
+}
+
+/// What the Plugins list says, and what the card beside it says.
+fn plugins_halves(scene: &Scene) -> (String, String) {
+    let panel = panel_box(scene);
+    (
+        text_where(scene, |at| at.x() < panel.max_x()),
+        text_where(scene, |at| at.x() >= panel.max_x()),
+    )
+}
+
+#[test]
+fn with_nothing_installed_the_plugins_list_points_at_the_store() {
+    let mut harness = Harness::new(1);
+    harness.show_plugins();
+    let (list, card) = plugins_halves(&harness.frame());
+
+    assert!(list.contains("Installed"), "{list}");
+    assert!(list.contains("Nothing installed yet"), "{list}");
+    assert!(list.contains("Built in"), "{list}");
+    assert!(
+        !list.contains("Window commands"),
+        "the built-in plugins are not folded away: {list}"
+    );
+    // Nothing on the list to be about, so no card about a hidden row.
+    assert!(
+        !card.contains("Window commands"),
+        "the card is about a row nobody can see: {card}"
+    );
+
+    harness.click_plugin("Open the Store");
+    assert!(
+        frame_text(&harness.frame()).contains("Search the registry"),
+        "the link did not open the Store"
+    );
+}
+
+#[test]
+fn choosing_a_built_in_plugin_opens_its_fold() {
+    // From the palette, a card's link or `--action`: the row the card is
+    // about has to be on the list.
+    let mut harness = Harness::new(1);
+    harness.show_plugins();
+    let (list, _) = plugins_halves(&harness.frame());
+    assert!(
+        !list.contains("Tabs"),
+        "the fold was open before anything was chosen: {list}"
+    );
+
+    harness.run_about("crook/plugins/show", "crook/tabs");
+    let (list, card) = plugins_halves(&harness.frame());
+
+    assert!(
+        list.contains("Window commands") && list.contains("Tabs"),
+        "the fold stayed shut over the chosen row: {list}"
+    );
+    assert!(card.contains("Tabs"), "{card}");
+}
+
+#[test]
+fn the_built_in_fold_is_stood_on_by_an_arrow_and_opened_by_enter() {
+    let mut harness = Harness::new(1);
+    harness.show_plugins();
+
+    // Onto the list, where the first row is the link to the Store; then
+    // down onto the fold, which an arrow only stands on.
+    harness.press("down", Modifiers::default(), "");
+    harness.frame();
+    harness.press("down", Modifiers::default(), "");
+    let (list, _) = plugins_halves(&harness.frame());
+    assert!(
+        !list.contains("Window commands"),
+        "arriving on the fold opened it: {list}"
+    );
+    assert!(
+        !frame_text(&harness.frame()).contains("Search the registry"),
+        "walking past the link to the Store followed it"
+    );
+
+    harness.press("enter", Modifiers::default(), "");
+    let (list, _) = plugins_halves(&harness.frame());
+    assert!(
+        list.contains("Window commands"),
+        "enter on the fold did not open it: {list}"
+    );
+
+    // Down chooses the first built-in, as a row does; back up onto the fold
+    // and Space shuts it — and lets go of the row it hid, so the card is
+    // not about something folded away.
+    harness.press("down", Modifiers::default(), "");
+    let (_, card) = plugins_halves(&harness.frame());
+    assert!(card.contains("Window commands"), "{card}");
+    harness.press("up", Modifiers::default(), "");
+    harness.frame();
+    harness.press("space", Modifiers::default(), " ");
+    let (list, card) = plugins_halves(&harness.frame());
+    assert!(
+        !list.contains("Window commands"),
+        "space on the fold did not shut it: {list}"
+    );
+    assert!(
+        !card.contains("Window commands"),
+        "the card is still about a row the fold hid: {card}"
     );
 }
 
@@ -35564,6 +35690,44 @@ mod sandboxed {
     }
 
     #[test]
+    fn the_plugins_list_leads_with_what_is_installed() {
+        // People open Plugins to see what they installed. Eighteen built-in
+        // modules listed first put the one plugin somebody chose at the foot
+        // of the list; now it is first, under its own heading, and the
+        // built-in ones are folded away under a count.
+        let scratch = Scratch::new("installed-first");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        let scene = harness.frame();
+        let list = panel_text(&scene);
+
+        let at = |word: &str| {
+            list.find(word)
+                .unwrap_or_else(|| panic!("{word:?} is not on the list: {list}"))
+        };
+        assert!(
+            at("Installed") < at("Probe") && at("Probe") < at("Built in"),
+            "the installed plugin is not first: {list}"
+        );
+        assert!(
+            !list.contains("Window commands"),
+            "the built-in plugins are not folded away: {list}"
+        );
+        // And the card is about the first row there is, which is the plugin
+        // somebody installed rather than a built-in nobody can see.
+        assert!(
+            says(&scene, "Installed, sandboxed"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
     fn a_plugin_installed_while_the_window_is_open_has_a_row_a_switch_and_an_allow() {
         // What installing from the store comes to on this page. The row, the
         // switch and Allow are one action each for the whole page, run about
@@ -35823,10 +35987,19 @@ mod sandboxed {
             );
             assert!(workspace.host().action(&toggle).is_none());
         });
-        // The first row is Window's, and the card followed the list.
-        assert!(says(&scene, "crook/window"), "{}", frame_text(&scene));
+        // Nothing else is installed and the built-in plugins are folded
+        // away, so the card does not follow the list to a row nobody can
+        // see: it says what the list holds.
+        assert!(
+            says(&scene, "What you add from the Store"),
+            "{}",
+            frame_text(&scene)
+        );
 
-        harness.click_plugin("Plugins");
+        // A row near the top of the opened fold: "Plugins" is far enough
+        // down it to scroll level with the sentence under the list, and a
+        // line read off the frame there is the two run together.
+        harness.click_plugin("Tabs");
         assert!(
             !says(&harness.frame(), "is off this machine"),
             "the sentence outlived the next choice"
@@ -39129,6 +39302,9 @@ mod sandboxed {
         fn tab_walks_the_plugins_from_the_box_to_the_list_to_the_card_and_back() {
             let mut harness = Harness::new(1);
             harness.show_plugins();
+            // Nothing is installed here, so the plugins to walk are the
+            // built-in ones, under a fold a window opens shut.
+            harness.open_built_in_plugins();
             assert_eq!(place(&harness, PLUGINS), Place::Search);
             assert!(rings(&harness.frame()).is_empty(), "a ring before any key");
             let first = card_title(&mut harness);
@@ -39577,6 +39753,7 @@ mod sandboxed {
             let window = vec2f(760., 360.);
             let mut harness = Harness::new(1);
             harness.show_plugins();
+            harness.open_built_in_plugins();
             harness.frame_sized(window);
             harness.press("tab", Modifiers::default(), "");
             harness.frame_sized(window);
@@ -39671,6 +39848,8 @@ mod sandboxed {
         fn a_query_that_finds_no_plugin_leaves_the_keyboard_in_the_box() {
             let mut harness = Harness::new(1);
             harness.show_plugins();
+            // A card to Tab onto: the first built-in's, with the fold open.
+            harness.open_built_in_plugins();
             key(&mut harness, "tab");
             key(&mut harness, "tab");
             assert_eq!(place(&harness, PLUGINS), Place::Control);
@@ -39858,10 +40037,15 @@ mod sandboxed {
 mod plugins_page {
     use super::*;
 
-    /// A harness showing the Plugins section of the sidebar.
+    /// A harness showing the Plugins section of the sidebar, with the fold
+    /// over the built-in plugins open: nothing is installed in a test, so
+    /// without it the list has no plugin row and the card nothing to be
+    /// about. Open, the card is about the first built-in, as it was before
+    /// there was a fold.
     fn harness() -> Harness {
         let mut harness = Harness::new(1);
         harness.show_plugins();
+        harness.open_built_in_plugins();
         harness
     }
 
@@ -40064,7 +40248,8 @@ mod plugins_page {
 
         // And the card is about the first of them, rather than empty: a card
         // saying "choose something" is a card explaining an interface instead
-        // of being one.
+        // of being one. (The first row there is, once the fold is open:
+        // nothing is installed here to come before it.)
         assert!(text.contains("crook/window"), "no card: {text}");
         assert!(text.contains("Built in"), "{text}");
         assert!(text.contains("Enabled"), "{text}");
@@ -40266,6 +40451,9 @@ mod section_layout {
         harness.open_settings_page();
         let rail = settings_rail_boxes(&harness.frame());
         harness.show_plugins();
+        // A plugin row to measure, which is the first built-in's with its
+        // fold open: nothing is installed here.
+        harness.open_built_in_plugins();
         let list = settings_rail_boxes(&harness.frame());
         harness.show_section("crook/store/section");
         let store = settings_rail_boxes(&harness.frame());
@@ -40287,12 +40475,17 @@ mod section_layout {
                 rail.min_x(),
                 row.min_x()
             );
-            assert!(
-                (rail.min_y() - row.min_y()).abs() < 0.5,
-                "the first rail row is at {} and the first {what} at {}",
-                rail.min_y(),
-                row.min_y()
-            );
+            // Not the plugins list's: it opens with its "Installed" heading
+            // and the fold above the first plugin row, so that row is lower
+            // by design. The Store's list has no headings.
+            if what == "a store row" {
+                assert!(
+                    (rail.min_y() - row.min_y()).abs() < 0.5,
+                    "the first rail row is at {} and the first {what} at {}",
+                    rail.min_y(),
+                    row.min_y()
+                );
+            }
         }
     }
 
@@ -40314,6 +40507,9 @@ mod section_layout {
                 }
                 _ => {
                     harness.show_plugins();
+                    // A card to scroll: the first built-in's, once its fold
+                    // is open, since nothing is installed here.
+                    harness.open_built_in_plugins();
                     // The command's *name*, which is the row's description
                     // and has a line to itself. Not its title: that is the
                     // label, and a label shares a baseline with the Run
@@ -40354,6 +40550,7 @@ mod section_layout {
         // and the only thing left saying a plugin was on was a six-pixel dot.
         let mut harness = Harness::new(1);
         harness.show_plugins();
+        harness.open_built_in_plugins();
         let scene = harness.frame();
         let panel = panel_box(&scene);
 
