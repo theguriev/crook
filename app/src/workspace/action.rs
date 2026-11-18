@@ -1014,6 +1014,9 @@ pub enum SettingsAction {
     /// index: this enum is `Copy`. See
     /// [`settings_page::prose`](crate::workspace::settings_page::prose).
     ToggleProse(u64),
+    /// Put a command or a path the page shows on the clipboard, named the
+    /// same way.
+    CopyText(u64),
 }
 
 /// What the options menu writes.

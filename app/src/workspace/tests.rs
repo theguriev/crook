@@ -17694,7 +17694,7 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
     let lines = text_lines(&scene, |position| pane.contains_point(position));
     let (origin, line) = lines
         .iter()
-        .find(|(_, line)| line.ends_with("settings.json"))
+        .find(|(_, line)| line.contains("settings.json"))
         .cloned()
         .expect("the About page names the settings file");
     let value = line.trim_start_matches("Settings file");
@@ -17716,19 +17716,20 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
         "the value is not on its label's row: label at {label_at:?}, value at {origin:?}"
     );
 
-    // The row's glyphs left to right, the label's line and the value's line
-    // together: within a pixel of the lines found above, since a line's
-    // origin is rounded and a glyph's is not, and the value's baseline sits
-    // half a pixel off its label's. The stub shaper advances half the font size per glyph — a
-    // label is set at 12 and a monospace value at 10.5 — so a glyph's right
+    // The row's glyphs left to right: the label's line, the value's and the
+    // Copy button's, which are three runs of text centred on one row, so
+    // within a few pixels of the lines found above rather than on them — a
+    // line's origin is rounded and a glyph's is not. The stub shaper advances
+    // half the font size per glyph — a label is set at 12, a monospace value
+    // and a button at 11 — so a glyph's right
     // edge is its origin plus that.
     let mut glyphs: Vec<(f32, char)> = scene
         .layers()
         .flat_map(|layer| layer.glyphs.iter())
         .filter(|glyph| {
             pane.contains_point(glyph.position)
-                && ((glyph.position.y() - origin.y()).abs() <= 1.
-                    || (glyph.position.y() - label_at.y()).abs() <= 1.)
+                && ((glyph.position.y() - origin.y()).abs() < 4.
+                    || (glyph.position.y() - label_at.y()).abs() < 4.)
         })
         .filter_map(|glyph| {
             Some((
@@ -17748,14 +17749,29 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
         "the value starts {}px after its label, which reads as one word",
         glyphs[mark].0 - label_end
     );
-    let last = glyphs.last().map(|(x, _)| *x).unwrap_or(f32::NAN) + 10.5 * 0.5;
+    // The path is copied rather than opened, so the button after it says
+    // Copy, and it is the button that stands against the edge: the value
+    // gives way before it.
+    let row: String = glyphs.iter().map(|(_, character)| character).collect();
+    assert!(
+        row.ends_with("Copy"),
+        "the path has no Copy after it: {row:?}"
+    );
+    let copy = glyphs.len() - "Copy".len();
+    let value_end = glyphs[copy - 1].0 + 11. * 0.5;
+    assert!(
+        glyphs[copy].0 - value_end >= 12.,
+        "the value runs into its button: ends at {value_end}, Copy starts at {}",
+        glyphs[copy].0
+    );
+    let last = glyphs.last().map(|(x, _)| *x).unwrap_or(f32::NAN) + 11. * 0.5;
     assert!(
         last <= edge + 0.5,
-        "the value ran past the page's edge: ends at {last}, the edge is at {edge}"
+        "the row ran past the page's edge: ends at {last}, the edge is at {edge}"
     );
     assert!(
-        last >= edge - 10.5,
-        "the value stopped short of the edge it is aligned to: ends at {last}, the edge is at {edge}"
+        last >= edge - 12.,
+        "the button stopped short of the edge it is aligned to: ends at {last}, the edge is at {edge}"
     );
 }
 
@@ -52518,6 +52534,17 @@ mod connecting_agents {
         let scene = harness.frame();
         assert!(says(&scene, "Not connected"), "{}", frame_text(&scene));
         assert!(says(&scene, "Connect"), "{}", frame_text(&scene));
+        // What Connect runs is on a line of its own with a Copy button, not
+        // the end of the sentence that introduces it.
+        let lines = page_lines(&scene);
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.contains("plugin marketplace add")
+                    && !line.contains("Not connected")),
+            "the commands are not on a line of their own: {lines:?}"
+        );
+        assert!(says(&scene, "Copy"), "{}", frame_text(&scene));
         assert!(
             agents.ran().is_empty(),
             "the look ran more than the list: {}",
@@ -52549,7 +52576,7 @@ mod connecting_agents {
         assert!(!says(&scene, "Not connected"), "{text}");
         // And how to have Claude Code keep it up to date, which it has no
         // command for: its first sentence on the row, and the how behind
-        // the row's "More".
+        // the row's "More", with the settings entry on a line of its own.
         assert!(says(&scene, "has no command that turns it on"), "{text}");
         assert!(!says(&scene, "Enable auto-update"), "{text}");
         let (label, _) = page_line(&scene, "Keep Claude Code");
@@ -52560,6 +52587,15 @@ mod connecting_agents {
         harness.click(more + vec2f(4., -4.), MouseButton::Left);
         let scene = harness.frame();
         assert!(says(&scene, "Enable auto-update"), "{}", frame_text(&scene));
+        let entry = page_lines(&scene)
+            .into_iter()
+            .find(|(_, line)| line.contains("extraKnownMarketplaces"))
+            .map(|(_, line)| line)
+            .unwrap_or_else(|| panic!("the entry is not drawn: {}", frame_text(&scene)));
+        assert!(
+            entry.starts_with('"'),
+            "the entry is still inside the sentence: {entry:?}"
+        );
     }
 
     #[test]
@@ -53586,8 +53622,8 @@ fn a_checkout_s_path_too_long_for_its_row_keeps_its_start_and_its_last_directory
 }
 
 /// What a settings page says at a glance: facts that do not look like
-/// switched-off settings, and long prose folded behind "More". See
-/// `settings_page::prose`.
+/// switched-off settings, long prose folded behind "More", and commands on a
+/// line of their own with a Copy button. See `settings_page::prose`.
 mod settings_prose {
     use super::*;
 
@@ -53634,6 +53670,16 @@ mod settings_prose {
         assert_eq!(page_line_color(&scene, "Version"), theme().text_primary);
         let value = page_word(&scene, env!("CARGO_PKG_VERSION"));
         assert_eq!(color_at(&scene, value), theme().text_muted);
+    }
+
+    #[test]
+    fn a_path_has_a_copy_button_after_it() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("About");
+        let scene = harness.frame();
+        let (_, line) = page_line(&scene, "crook_plugin_api");
+        assert!(line.ends_with("Copy"), "{line:?}");
     }
 
     #[test]
@@ -53722,5 +53768,36 @@ mod settings_prose {
         );
         assert!(!says(&scene, "Less"), "{}", frame_text(&scene));
         assert!(!says(&scene, "More"), "{}", frame_text(&scene));
+    }
+
+    #[test]
+    fn a_command_is_on_a_line_of_its_own_and_copy_copies_it() {
+        // The marks' row used to end "and crook --shell-integration <shell>
+        // prints them.", a command a person had to cut out of a sentence.
+        let mut harness = shell("integration");
+        let scene = harness.frame();
+        let lines = page_lines(&scene);
+        let command = "crook --shell-integration <shell>";
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.trim_end_matches("Copy") == command),
+            "the command is not on a line of its own: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, line)| line.contains("prints them") && line.contains("--shell")),
+            "the command is still in the sentence: {lines:?}"
+        );
+
+        let clipboard = super::shells::working_clipboard(&harness);
+        key(&mut harness, "down");
+        key(&mut harness, "enter");
+        let scene = harness.frame();
+        assert!(says(&scene, "Copied"), "{}", frame_text(&scene));
+        if let Some((clipboard, _held)) = clipboard {
+            assert_eq!(clipboard.read().as_deref(), Some(command));
+        }
     }
 }

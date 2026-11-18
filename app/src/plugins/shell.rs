@@ -83,7 +83,7 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
     let state = workspace.settings_page();
     let (standing, was_named) = workspace.shell_standing(app);
 
-    let program = widgets::fact(
+    let program = widgets::path(
         Words::new("Shell")
             .with_description(if was_named {
                 "What --shell named when Crook was started, for every pane of this run."
@@ -96,7 +96,6 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
                 "shell", "program", "path", "which", "zsh", "bash", "fish", "sh", "default",
             ]),
         standing.program.display().to_string(),
-        true,
         fonts,
     );
 
@@ -105,9 +104,10 @@ fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
             .with_description(
                 "What turns a pane's output into blocks, one per command. Crook installs them \
                  for zsh, bash and fish when it starts the shell. A shell it did not start — over \
-                 ssh, in a container — needs them pasted into its own configuration, and \
-                 crook --shell-integration <shell> prints them.",
+                 ssh, in a container — needs them pasted into its own configuration, and this \
+                 prints them:",
             )
+            .with_command("crook --shell-integration <shell>")
             .with_keywords(&[
                 "marks",
                 "blocks",

@@ -360,7 +360,7 @@ fn about(
                 // this build speaks. The value is the line their Cargo.toml
                 // wants, because the crate is versioned `0.<ABI>.<patch>` for
                 // exactly that reason: see the README's "For plugin authors".
-                widgets::fact(
+                widgets::path(
                     Words::new("Plugin API")
                         .with_description(format!(
                             "ABI {ABI_VERSION}: the vocabulary a plugin from a file is built \
@@ -370,10 +370,12 @@ fn about(
                         ))
                         .with_keywords(&["abi", "plugin", "api", "wasm", "sdk", "crate"]),
                     format!("crook_plugin_api = \"0.{ABI_VERSION}\""),
-                    true,
                     fonts,
                 ),
-                widgets::fact(settings_file, file, is_a_path, fonts),
+                match is_a_path {
+                    true => widgets::path(settings_file, file, fonts),
+                    false => widgets::fact(settings_file, file, false, fonts),
+                },
                 reports_row(workspace),
                 update_row(workspace, model, app),
             ],

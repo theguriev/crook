@@ -14238,6 +14238,11 @@ impl Workspace {
                 self.page.prose.toggle(id);
                 ctx.notify();
             }
+            SettingsAction::CopyText(id) => {
+                if self.page.prose.copy(id, &self.clipboard) {
+                    ctx.notify();
+                }
+            }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset
                 // ends the command line's overrides exactly as clicking each

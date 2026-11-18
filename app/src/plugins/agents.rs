@@ -153,13 +153,14 @@ fn agents(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
         widgets::category("Hints", vec![hints]),
         widgets::category(
             "How it works",
-            vec![widgets::note(
+            vec![widgets::note_with_command(
                 "Connect and Update open a tab and run the agent\u{2019}s own plugin commands \
                  in it, where you can read every word and what it printed; Crook edits none of \
                  the agent\u{2019}s files. Nothing is installed until you press one. This page \
                  asks each agent what it has with its own read-only `plugin list` when it is \
-                 shown. To set the hooks up by hand instead, `crook --agent-hooks claude` \
-                 \u{2014} or codex, or copilot \u{2014} prints them, and the same commands.",
+                 shown. To set the hooks up by hand instead, this \u{2014} with codex or copilot \
+                 for claude \u{2014} prints them, and the same commands:",
+                "crook --agent-hooks claude",
                 ui,
             )],
         ),
@@ -178,7 +179,12 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
     let typed = connect::typed_as(located, shell.as_os_str());
     let line = |step| connect::line(agent, step, &typed, shell.as_os_str());
 
-    let (said, press): (String, Option<(&str, &str)>) = match connections.outcome(agent) {
+    // The sentence, the step whose commands it introduces — set on a line of
+    // their own under it, with a Copy button, rather than inside it — and
+    // the press.
+    let (said, runs, press): (String, Option<Step>, Option<(&str, &str)>) = match connections
+        .outcome(agent)
+    {
         // Its button shows the tab rather than running anything again: a
         // shell that marks no commands, cmd.exe or PowerShell, never says the
         // line ended, and the row would otherwise have nothing to press.
@@ -187,6 +193,7 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
                 "Running in the \u{201c}{title}\u{201d} tab\u{2026} Open this page again \
                  once it is done to see what it came to."
             ),
+            None,
             Some((
                 "Show tab",
                 match step {
@@ -208,23 +215,22 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
             };
             (
                 format!("What ran in the \u{201c}{title}\u{201d} tab {ended}; the tab says why."),
+                None,
                 Some(("Try again", name)),
             )
         }
         _ => match connections.looked_at(agent) {
-            None | Some(Looked::Asking) => (format!("Asking {program} what it has\u{2026}"), None),
+            None | Some(Looked::Asking) => {
+                (format!("Asking {program} what it has\u{2026}"), None, None)
+            }
             Some(Looked::Unanswered(why)) => (
-                format!(
-                    "Could not ask {program} what it has: {why}. Connect runs: {}",
-                    line(Step::Connect).unwrap_or_default()
-                ),
+                format!("Could not ask {program} what it has: {why}. Connect runs this:"),
+                Some(Step::Connect),
                 Some(("Connect", "connect")),
             ),
             Some(Looked::Said(Standing::Missing)) => (
-                format!(
-                    "Not connected. Connect runs, in a tab of its own: {}",
-                    line(Step::Connect).unwrap_or_default()
-                ),
+                String::from("Not connected. Connect runs this, in a tab of its own:"),
+                Some(Step::Connect),
                 Some(("Connect", "connect")),
             ),
             Some(Looked::Said(Standing::Connected { version })) => (
@@ -245,19 +251,21 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
                          way."
                     ),
                 },
+                None,
                 Some(("Update", "update")),
             ),
             Some(Looked::Said(Standing::Behind { version })) => (
                 format!(
                     "Update available: the plugin is {version}, and this is Crook {}. Update \
-                     runs: {}",
+                     runs this:",
                     env!("CARGO_PKG_VERSION"),
-                    line(Step::Update).unwrap_or_default()
                 ),
+                Some(Step::Update),
                 Some(("Update", "update")),
             ),
             Some(Looked::Said(Standing::Off)) => (
                 format!("Installed, and turned off in {program}."),
+                None,
                 Some(("Update", "update")),
             ),
         },
@@ -265,10 +273,16 @@ fn agent_row(workspace: &Workspace, located: &connect::Located, app: &AppContext
 
     let command = press.and_then(|(_, name)| about(workspace, name, agent));
     let label = press.map_or("Connect", |(label, _)| label);
+    let mut words = Words::new(program)
+        .with_description(said)
+        .with_keywords(&["agent", "plugin", "connect", "install", "update", agent]);
+    // Read off the same `line` the press runs, so the line a person copies
+    // is the line the button would have run.
+    if let Some(runs) = runs.and_then(line) {
+        words = words.with_command(runs);
+    }
     widgets::row(
-        Words::new(program)
-            .with_description(said)
-            .with_keywords(&["agent", "plugin", "connect", "install", "update", agent]),
+        words,
         true,
         widgets::text_button(
             label,
@@ -303,29 +317,35 @@ fn auto_update_row(workspace: &Workspace) -> Option<Entry> {
         return None;
     }
     let ui = workspace.fonts().ui;
-    let said = match connections.claude_updates() {
-        true => String::from(
+    // The settings entry, where there is one to add, on a line of its own
+    // with a Copy button rather than at the end of the sentence.
+    let (said, entry) = match connections.claude_updates() {
+        true => (
             "Claude Code updates it by itself: auto-update is on for the crook marketplace.",
+            None,
         ),
-        false => format!(
+        false => (
             "Claude Code updates a marketplace like Crook\u{2019}s only once auto-update is \
              on for it, and has no command that turns it on. In Claude Code, /plugin \u{203a} \
              Marketplaces \u{203a} crook \u{203a} Enable auto-update does it; or add \
              \u{201c}autoUpdate\u{201d} to Crook\u{2019}s entry in Claude Code\u{2019}s \
-             settings.json yourself, which Crook does not edit: {}",
-            connect::CLAUDE_AUTO_UPDATE
+             settings.json yourself, which Crook does not edit:",
+            Some(connect::CLAUDE_AUTO_UPDATE),
         ),
     };
+    let mut words =
+        Words::new("Keep Claude Code\u{2019}s plugin up to date").with_description(said);
+    if let Some(entry) = entry {
+        words = words.with_command(entry);
+    }
     Some(widgets::row(
-        Words::new("Keep Claude Code\u{2019}s plugin up to date")
-            .with_description(said)
-            .with_keywords(&[
-                "auto-update",
-                "autoupdate",
-                "update",
-                "marketplace",
-                "claude",
-            ]),
+        words.with_keywords(&[
+            "auto-update",
+            "autoupdate",
+            "update",
+            "marketplace",
+            "claude",
+        ]),
         true,
         Empty::new().finish(),
         ui,

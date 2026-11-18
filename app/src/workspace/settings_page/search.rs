@@ -24,6 +24,12 @@ pub(crate) struct Words {
     pub(crate) description: Option<String>,
     /// Words that find the row but are not written on it.
     pub(crate) keywords: Vec<String>,
+    /// A command the line under the label introduces, drawn on a line of its
+    /// own with a Copy button rather than inside the sentence.
+    ///
+    /// Found by the search like the sentence it used to be part of: somebody
+    /// who remembers `--shell-integration` types that.
+    pub(crate) command: Option<String>,
 }
 
 impl Words {
@@ -33,6 +39,7 @@ impl Words {
             label: label.into(),
             description: None,
             keywords: Vec::new(),
+            command: None,
         }
     }
 
@@ -45,6 +52,12 @@ impl Words {
     /// The same, with words that are not written on the row.
     pub(crate) fn with_keywords(mut self, keywords: &[&str]) -> Self {
         self.keywords = keywords.iter().map(|word| (*word).to_owned()).collect();
+        self
+    }
+
+    /// The same, with a command the line under the label introduces.
+    pub(crate) fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
         self
     }
 }
@@ -104,6 +117,10 @@ impl Query {
                     .as_deref()
                     .is_some_and(|line| contains(line, term))
                 || words.keywords.iter().any(|word| contains(word, term))
+                || words
+                    .command
+                    .as_deref()
+                    .is_some_and(|command| contains(command, term))
                 || context.iter().any(|word| contains(word, term))
         })
     }

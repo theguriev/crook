@@ -397,6 +397,7 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
         enabled,
         control,
         words.description.clone(),
+        words.command.clone(),
         ui,
     );
     Entry {
@@ -435,6 +436,7 @@ pub(crate) fn revealing_row(
 ) -> Entry {
     let label = words.label.clone();
     let resting = words.description.clone();
+    let command = words.command.clone();
     let Reveal {
         state,
         revealed,
@@ -442,14 +444,16 @@ pub(crate) fn revealing_row(
     } = reveal;
 
     let element = Hoverable::new(state, move |mouse| {
-        let description = match shown || mouse.is_hovered() {
-            true => Some(revealed),
-            false => resting,
+        // The command belongs to the resting description, and goes with it
+        // while the revealed line stands in for it.
+        let (description, command) = match shown || mouse.is_hovered() {
+            true => (Some(revealed), None),
+            false => (resting, command),
         };
         match description {
-            Some(_) => row_column(label, enabled, control, description, ui),
+            Some(_) => row_column(label, enabled, control, description, command, ui),
             None => {
-                let column = row_column(label, enabled, control, None, ui);
+                let column = row_column(label, enabled, control, None, None, ui);
                 Flex::column()
                     .with_main_axis_size(MainAxisSize::Min)
                     .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -493,12 +497,14 @@ fn description_room() -> Box<dyn Element> {
         .finish()
 }
 
-/// A row's label, its control beside it, and its description under both.
+/// A row's label, its control beside it, and its description under both,
+/// with the command the description introduces when it has one.
 fn row_column(
     label: String,
     enabled: bool,
     control: Box<dyn Element>,
     description: Option<String>,
+    command: Option<String>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let mut column = Flex::column()
@@ -542,7 +548,7 @@ fn row_column(
     // to the label's share of the line would be cut off at the width of
     // whatever control happens to sit beside it.
     if let Some(description) = description {
-        column.add_child(description_text(description, ui));
+        column.add_child(description_text(description, command.as_deref(), ui));
     }
 
     column.finish()
@@ -574,15 +580,20 @@ fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
         .finish()
 }
 
-/// The second line under a label.
+/// The second line under a label, and the command it introduces, if there
+/// is one.
 ///
 /// Wrapped rather than cut off. This was a `Text`, which loses its last words
 /// wherever a description is long — under a slot that lists eight entries, or
 /// in the window the docked Themes panel leaves — and at the line height a
 /// `Text` draws one line at, so a description that fitted draws the pixels it
-/// drew. On a settings page a long one is folded behind "More": see
-/// [`prose`].
-fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
+/// drew. On a settings page a long one is folded behind "More", and its
+/// command is set on a line of its own: see [`prose`].
+///
+/// The right margin is the paragraph's alone. The fold's button and the
+/// command's line go the full width, so the Copy button stands in the
+/// column the row's control stands in.
+fn description_text(description: String, command: Option<&str>, ui: FamilyId) -> Box<dyn Element> {
     let paragraph = |text: String| {
         Container::new(
             Paragraph::new(text, ui, DESCRIPTION_SIZE)
@@ -592,7 +603,7 @@ fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
         .with_margin_right(DESCRIPTION_RIGHT_MARGIN)
         .finish()
     };
-    Container::new(prose::folded(&description, ui, paragraph))
+    Container::new(prose::folded(&description, command, ui, paragraph))
         .with_margin_top(DESCRIPTION_MARGIN_TOP)
         .finish()
 }
@@ -618,7 +629,7 @@ pub(crate) fn choice_group(
         .with_child(label_text(words.label.clone(), enabled, ui));
 
     if let Some(description) = words.description.clone() {
-        column.add_child(description_text(description, ui));
+        column.add_child(description_text(description, words.command.as_deref(), ui));
     }
 
     column.add_child(
@@ -1779,7 +1790,8 @@ const FACT_GAP: f32 = 16.;
 ///
 /// `monospace` is for the values that are paths: a settings file's location is
 /// something a person copies into a shell, and proportional text turns runs of
-/// slashes and dots into a smear.
+/// slashes and dots into a smear. A path that is meant to be taken somewhere
+/// is a [`path`], which has a Copy button after it.
 ///
 /// The value takes the room the label leaves and not a pixel more. A path
 /// under a scratch home is longer than the page is wide, and a text that was
@@ -1797,6 +1809,16 @@ pub(crate) fn fact(
     fonts: super::super::view::Fonts,
 ) -> Entry {
     fact_row(words, value, monospace, None, fonts)
+}
+
+/// A [`fact`] whose value is a path or a line of code, with the button that
+/// copies it.
+///
+/// Where a page is being read; on a surface that keeps no record of what its
+/// buttons copy, it is a monospace [`fact`].
+pub(crate) fn path(words: Words, path: String, fonts: super::super::view::Fonts) -> Entry {
+    let copy = prose::copy(&path);
+    fact_row(words, path, true, copy, fonts)
 }
 
 /// A [`fact`] whose value is a path, with a control after it: a folder, and
@@ -1874,7 +1896,11 @@ fn fact_row(
     // wrong the moment a page had something to say about a row it prints, like
     // the name a chord is bound by.
     if let Some(description) = words.description.clone() {
-        column.add_child(description_text(description, fonts.ui));
+        column.add_child(description_text(
+            description,
+            words.command.as_deref(),
+            fonts.ui,
+        ));
     }
 
     Entry {
@@ -1896,10 +1922,23 @@ fn fact_row(
 /// lines, with the rest behind "More" — the "How it works" paragraphs were
 /// longer than the rows they explain. See [`prose`].
 pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
+    noted(text, None, ui)
+}
+
+/// A [`note`] that introduces a command, which is drawn on a line of its own
+/// with the button that copies it.
+pub(crate) fn note_with_command(text: &str, command: &str, ui: FamilyId) -> Entry {
+    noted(text, Some(command), ui)
+}
+
+/// The note both of those are.
+fn noted(text: &str, command: Option<&str>, ui: FamilyId) -> Entry {
     Entry::unsearchable(
-        Container::new(prose::folded(text, ui, |text| note_text(&text, ui)))
-            .with_margin_bottom(NOTE_GAP)
-            .finish(),
+        Container::new(prose::folded(text, command, ui, |text| {
+            note_text(&text, ui)
+        }))
+        .with_margin_bottom(NOTE_GAP)
+        .finish(),
     )
 }
 

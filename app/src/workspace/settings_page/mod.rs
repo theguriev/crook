@@ -180,7 +180,7 @@ pub(crate) struct SettingsState {
     /// keyboard of whichever section is showing, and it can only reach what
     /// it holds.
     sections: std::cell::RefCell<HashMap<String, focus::Focus>>,
-    /// Which folded paragraphs are open.
+    /// Which folded paragraphs are open and what the Copy buttons copy.
     ///
     /// Shared with the widgets while a page is built, which is why it is
     /// behind an `Rc`: see [`prose`].
@@ -298,7 +298,7 @@ pub(crate) fn render(
     // long description is folded and one the query found in is open: see
     // [`prose`].
     let build = |id: PageId| {
-        prose::reading(state.prose.clone(), &query, || {
+        prose::reading(state.prose.clone(), &query, workspace.fonts(), || {
             host.build_settings_page(id, workspace, app)
         })
     };
