@@ -134,8 +134,8 @@ fn the_ansi_set_is_the_one_that_reads_on_the_background_it_will_be_drawn_on() {
     // Warp picks by which foreground won, which is right at both ends of the
     // range and wrong in the middle. The two extremes still land where they
     // should:
-    let (on_black, _) = ansi_for(Color::hex(0x000000));
-    let (on_white, _) = ansi_for(Color::hex(0xffffff));
+    let (on_black, _) = standard_for(Color::hex(0x000000));
+    let (on_white, _) = standard_for(Color::hex(0xffffff));
     assert_eq!(on_black, ANSI_NORMAL);
     assert_eq!(on_white, LIGHT.terminal.normal);
 
@@ -180,10 +180,122 @@ fn the_ansi_set_is_the_one_that_reads_on_the_background_it_will_be_drawn_on() {
         "the middle takes black text"
     );
     assert_eq!(
-        ansi_for(mid).0,
+        standard_for(mid).0,
         ANSI_NORMAL,
         "a mid-tone grid should take the colours that read on it, not the ones its text implies"
     );
+}
+
+#[test]
+fn every_swatch_gives_colours_its_background_can_carry() {
+    // The creator's own preview prints `ls` in blue and red, and on the
+    // darkest swatch Crook Dark offers, `#323336`, those were the xterm
+    // `#0000ee` and `#cd0000`: 1.3:1 and 2.2:1. Whatever swatch a
+    // person picks, out of whatever theme, colours 1 to 6 and 9 to 14 are
+    // text on it and are held to WCAG's 4.5:1.
+    for builtin in crate::theme::BUILTIN {
+        let mut draft = Draft::new(&builtin.theme);
+        for index in 0..CANDIDATES {
+            draft.choose(index);
+            let terminal = draft.theme.terminal;
+            for (half, eight) in [("normal", terminal.normal), ("bright", terminal.bright)] {
+                for (slot, color) in eight.iter().enumerate().skip(1).take(6) {
+                    let ratio = contrast(*color, terminal.background);
+                    assert!(
+                        ratio >= TEXT_CONTRAST,
+                        "{}: swatch {index}, {:?}, gives {half} {slot} {color:?} at {ratio:.2}:1",
+                        builtin.name,
+                        terminal.background
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_carried_colour_keeps_its_hue_and_its_black_and_white() {
+    // Only lightness moves. A red that came out orange would read and be
+    // wrong, so the hue of every moved colour that still has colour enough
+    // to have a hue is where it started.
+    for background in [
+        Color::hex(0x000000),
+        Color::hex(0x1a1d24),
+        Color::hex(0x7a7394),
+        Color::hex(0xf94234),
+        Color::hex(0xade53b),
+        Color::hex(0x1f8744),
+        Color::hex(0xfbfbfd),
+    ] {
+        let standard = standard_for(background);
+        let carried = ansi_for(background);
+        for (from, to) in [(standard.0, carried.0), (standard.1, carried.1)] {
+            for slot in [0, 7] {
+                assert_eq!(
+                    from[slot], to[slot],
+                    "slot {slot} is not the standard set's"
+                );
+            }
+            for slot in 1..7 {
+                let (before, after) = (Oklch::of(from[slot]), Oklch::of(to[slot]));
+                // Near black and near white one sRGB step is several degrees
+                // of hue, so a colour pushed that far is checked for reading
+                // rather than for its angle.
+                if after.c < 0.04 || !(0.2..=0.95).contains(&after.l) {
+                    continue;
+                }
+                let turned = (after.h - before.h).abs().to_degrees();
+                let turned = turned.min(360. - turned);
+                assert!(
+                    turned < 4.,
+                    "on {background:?}, {:?} became {:?}, {turned:.1} degrees round",
+                    from[slot],
+                    to[slot]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_colour_that_already_reads_is_left_alone() {
+    // White's grid and the xterm red: 5.0:1 already. Moving it would be a
+    // round trip for nothing, and a theme made on white would stop being
+    // the standard colours for no reason a person could see.
+    let (normal, _) = ansi_for(Color::hex(0xffffff));
+    assert_eq!(normal, LIGHT.terminal.normal);
+}
+
+#[test]
+fn a_bright_colour_that_had_to_move_lands_past_its_normal_one() {
+    // On black, xterm's normal and bright blue both fall short and would
+    // otherwise both stop at the same 4.5:1, as one colour.
+    let (normal, bright) = ansi_for(Color::hex(0x000000));
+    let (normal, bright) = (Oklch::of(normal[4]), Oklch::of(bright[4]));
+    assert!(
+        bright.l >= normal.l + BRIGHT_STEP - 0.01,
+        "bright blue is at lightness {:.3}, normal at {:.3}",
+        bright.l,
+        normal.l
+    );
+}
+
+#[test]
+fn oklch_survives_a_round_trip_through_a_colour() {
+    for color in [
+        Color::hex(0x000000),
+        Color::hex(0xffffff),
+        Color::hex(0x0000ee),
+        Color::hex(0xcd0000),
+        Color::hex(0x8b5cf6),
+    ] {
+        let oklch = Oklch::of(color);
+        let round_tripped = oklch.at_lightness(oklch.l);
+        assert!(
+            apart(color, round_tripped) <= 1,
+            "{color:?} came back as {round_tripped:?}"
+        );
+    }
 }
 
 #[test]
