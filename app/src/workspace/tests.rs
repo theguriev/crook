@@ -50084,6 +50084,46 @@ mod answering_card {
     }
 
     #[test]
+    fn the_chip_counts_a_pane_with_a_question_once_and_its_waiting_press_skips_it() {
+        // Three questions in three tabs behind the one being looked at read
+        // "3 to answer" and "3 waiting": each of those panes is waiting
+        // because of its question, so the chip said the same three agents
+        // twice. The waiting half counts only what the questions do not.
+        let mut harness = Harness::new(5);
+        let tabs = harness.tab_ids();
+        let panes: Vec<PaneId> = tabs.iter().map(|tab| harness.panes_of(*tab)[0]).collect();
+        harness.dispatch_workspace_action(WorkspaceAction::Tab(TabAction::FocusPane(panes[4])));
+        let _a = hold_request(&mut harness, panes[0], "a", command("echo a", false), None);
+        let _b = hold_request(&mut harness, panes[1], "b", command("echo b", false), None);
+        let _c = hold_request(&mut harness, panes[2], "c", command("echo c", false), None);
+        let text = frame_text(&harness.frame());
+        assert!(text.contains("3 to answer"), "{text}");
+        assert!(
+            !text.contains(" waiting"),
+            "the panes with a question are counted again as waiting: {text}"
+        );
+
+        // A bell in a pane with no question: that, and only that, is waiting.
+        let bell = TerminalUpdate::Bell {
+            pane: panes[3],
+            while_running: false,
+        };
+        harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&bell, ctx));
+        let text = frame_text(&harness.frame());
+        assert!(
+            text.contains("3 to answer") && text.contains("1 waiting"),
+            "{text}"
+        );
+
+        // Its press goes to the pane it counted, past the asking panes that
+        // come before it in the panel's order after the active tab.
+        settle_chip(&mut harness);
+        press(&mut harness, "1 waiting");
+        assert_eq!(harness.focused_pane_id(), Some(panes[3]));
+        assert_eq!(card_on(&harness), None);
+    }
+
+    #[test]
     fn rows_keep_their_order_when_asks_arrive_and_end() {
         let mut harness = Harness::new(4);
         let tabs = harness.tab_ids();
@@ -50900,7 +50940,11 @@ mod answering_card {
                 strip_text(&harness.frame())
             );
             assert_eq!(waiting(&harness), 1);
-            assert!(frame_text(&harness.frame()).contains("1 waiting"));
+            // Counted once in the header, as a question: the chip's waiting
+            // half is for what the questions do not cover.
+            let text = frame_text(&harness.frame());
+            assert!(text.contains("1 to answer"), "{text}");
+            assert!(!text.contains("1 waiting"), "{text}");
             assert_eq!(
                 session(&harness, away, |session| session.attention.clone()),
                 Some(Attention::Asked)

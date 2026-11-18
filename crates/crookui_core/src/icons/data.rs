@@ -389,6 +389,22 @@ pub(super) static BELL: &[Segment] = &[
     Cubic(6.0, 12.499, 4.589, 13.956, 3.262, 15.326),
 ];
 
+/// Lucide's `circle-question-mark`.
+pub(super) static CIRCLE_QUESTION_MARK: &[Segment] = &[
+    Move(22.0, 12.0),
+    Cubic(22.0, 17.5228, 17.5228, 22.0, 12.0, 22.0),
+    Cubic(6.4772, 22.0, 2.0, 17.5228, 2.0, 12.0),
+    Cubic(2.0, 6.4772, 6.4772, 2.0, 12.0, 2.0),
+    Cubic(17.5228, 2.0, 22.0, 6.4772, 22.0, 12.0),
+    Close,
+    Move(9.09, 9.0),
+    Cubic(9.5734, 7.6258, 10.9914, 6.7924, 12.4272, 7.0387),
+    Cubic(13.863, 7.285, 14.9222, 8.5432, 14.92, 10.0),
+    Cubic(14.92, 12.0, 11.92, 13.0, 11.92, 13.0),
+    Move(12.0, 17.0),
+    Line(12.01, 17.0),
+];
+
 /// Lucide's `circle`.
 pub(super) static CIRCLE: &[Segment] = &[
     Move(22.0, 12.0),
@@ -671,6 +687,11 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Keyboard, "keyboard", KEYBOARD),
     (Lucide::Diff, "diff", DIFF),
     (Lucide::Bell, "bell", BELL),
+    (
+        Lucide::CircleQuestionMark,
+        "circle-question-mark",
+        CIRCLE_QUESTION_MARK,
+    ),
     (Lucide::Circle, "circle", CIRCLE),
     (Lucide::CircleX, "circle-x", CIRCLE_X),
     (Lucide::AppWindow, "app-window", APP_WINDOW),
@@ -685,7 +706,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 35;
+pub const ICONS: usize = 36;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -789,6 +810,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`bell`](https://lucide.dev/icons/bell).
     Bell,
+    /// The questions agents' hooks are waiting on, on the header's chip that counts them.
+    ///
+    /// Lucide's [`circle-question-mark`](https://lucide.dev/icons/circle-question-mark).
+    CircleQuestionMark,
     /// A row's mark while its agent is idle, when the marks are glyphs.
     ///
     /// Lucide's [`circle`](https://lucide.dev/icons/circle).

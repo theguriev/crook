@@ -60,6 +60,7 @@ ICONS = [
     ("Keyboard", "keyboard", "A chord: what one key would do, on the chip that says so."),
     ("Diff", "diff", "How much has changed in a working tree, on the chip that counts it."),
     ("Bell", "bell", "The tabs that are waiting for you, on the chip in the header that counts them; a row's mark while its agent needs an answer, when the marks are glyphs."),
+    ("CircleQuestionMark", "circle-question-mark", "The questions agents' hooks are waiting on, on the header's chip that counts them."),
     # The status marks a row draws instead of its disc, for a person who reads
     # shapes better than colours. Running is `play` and waiting is `bell`,
     # both already here; these two are the states nothing else drew.
