@@ -1400,7 +1400,7 @@ fn worktree_row(
     let removable = removable(worktree, here || elsewhere);
 
     let label = branch_label(worktree);
-    let path = crate::git::user_friendly_path(&worktree.path, workspace.home());
+    let path = checkout_place(&worktree.path, state.store.as_deref(), workspace.home());
     let status = if here {
         Some("this tab")
     } else if elsewhere {
@@ -1499,14 +1499,9 @@ fn worktree_row(
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(line.finish())
                 .with_child(
-                    Container::new(
-                        Text::new(path.clone(), ui, PATH_SIZE)
-                            .with_color(theme().text_muted)
-                            .with_ellipsis(Cut::Start)
-                            .finish(),
-                    )
-                    .with_margin_top(1.)
-                    .finish(),
+                    Container::new(place_line(&path, ui))
+                        .with_margin_top(1.)
+                        .finish(),
                 )
                 .finish(),
         )
@@ -1713,17 +1708,12 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     // the answer to "where will this end up", which is a question about the
     // name being typed.
     if let Some(checkout) = checkout_for(workspace) {
-        let path = crate::git::user_friendly_path(&checkout, workspace.home());
+        let path = checkout_place(&checkout, state.store.as_deref(), workspace.home());
         column.add_child(
-            Container::new(
-                Text::new(path, ui, PATH_SIZE)
-                    .with_color(theme().text_muted)
-                    .with_ellipsis(Cut::Start)
-                    .finish(),
-            )
-            .with_horizontal_padding(ROW_INSET)
-            .with_margin_top(6.)
-            .finish(),
+            Container::new(place_line(&path, ui))
+                .with_horizontal_padding(ROW_INSET)
+                .with_margin_top(6.)
+                .finish(),
         );
     }
 
@@ -2660,6 +2650,83 @@ pub(super) fn checkout_for(workspace: &Workspace) -> Option<PathBuf> {
         .to_owned();
 
     (!branch.is_empty()).then(|| crate::git::worktree::checkout_path(store, repository, &branch))
+}
+
+/// Where a checkout is, as the line under its branch writes it.
+///
+/// The part that tells one checkout from another is the part after Crook's
+/// store: every checkout Crook made is in `~/.local/share/crook/worktrees`,
+/// under the repository's own folder, so written out whole every row in the
+/// list began with the same forty characters and the row — cut from the
+/// start to fit — kept a few letters of the store's name in front of the
+/// checkout's. Inside the store the line starts at the store's own folder
+/// instead, `worktrees/crook/breathing-disc`: the folder's name says the
+/// checkout is one Crook keeps, and what follows is the repository and the
+/// directory, which is the one word that differs from row to row — and the
+/// one worth reading when it is not the branch's own name, as it is not once
+/// a checkout has changed branch.
+///
+/// Anywhere else — the main checkout, or one made by hand — it is the path
+/// with the home directory written `~`, as a working directory is everywhere
+/// else in Crook.
+pub(super) fn checkout_place(path: &Path, store: Option<&Path>, home: Option<&Path>) -> String {
+    let inside = store.and_then(|store| {
+        let rest = path.strip_prefix(store).ok()?;
+        if rest.as_os_str().is_empty() {
+            return None;
+        }
+        Some(match store.file_name() {
+            Some(name) => Path::new(name).join(rest),
+            None => rest.to_path_buf(),
+        })
+    });
+    match inside {
+        Some(place) => place.to_string_lossy().into_owned(),
+        None => crate::git::user_friendly_path(path, home),
+    }
+}
+
+/// `place` cut where its last directory begins: what leads up to it, and the
+/// separator with the directory itself.
+///
+/// The separator goes with the directory, so that a start cut short with a
+/// mark still reads `worktrees/cr…/breathing-disc` and the last name is plainly
+/// a name of its own. A place with no separator in it is all directory.
+pub(super) fn place_parts(place: &str) -> (&str, &str) {
+    match place.rfind(std::path::is_separator) {
+        Some(at) if at > 0 => place.split_at(at),
+        _ => ("", place),
+    }
+}
+
+/// A checkout's place on one line, cut in the middle when it does not fit.
+///
+/// The two ends are the two parts worth keeping: the start says which tree
+/// the checkout is in — Crook's store, the home directory, somewhere else —
+/// and the last directory says which checkout it is. Cut from the start, as
+/// it was, a long path kept the end and lost where it was; cut from the end,
+/// it would keep the store and lose the one word that differs between rows.
+/// So the last directory is laid out whole, and what leads up to it takes the
+/// room that is left and gives way with a mark. A last directory wider than
+/// the whole line is cut at its own end, which is still the start of its
+/// name.
+fn place_line(place: &str, ui: FamilyId) -> Box<dyn Element> {
+    let (lead, last) = place_parts(place);
+    let text = |part: &str| {
+        Text::new(part.to_owned(), ui, PATH_SIZE)
+            .with_color(theme().text_muted)
+            .with_ellipsis(Cut::End)
+            .finish()
+    };
+    let mut line = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_no_overflow();
+    if !lead.is_empty() {
+        line.add_child(Shrinkable::new(1., text(lead)).finish());
+    }
+    line.add_child(text(last));
+    line.finish()
 }
 
 /// What a worktree is called: its branch, or the head it is sitting on.
