@@ -16,7 +16,7 @@
 
 use crookui_core::prelude::*;
 
-use crook_plugin::{Manifest, PluginId, Tier};
+use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::settings::{
@@ -26,7 +26,9 @@ use crate::settings::{
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category, Entry, Segment};
 use crate::workspace::settings_page::{keyed, named};
-use crate::workspace::{OptionsAction, SettingsAction, ThemeAction, Workspace, theme_preview};
+use crate::workspace::{
+    OptionsAction, SettingsAction, ThemeAction, Workspace, WorkspaceAction, theme_preview,
+};
 
 /// The plugin that owns the Appearance page.
 pub struct Appearance;
@@ -41,11 +43,23 @@ impl Plugin for Appearance {
     }
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        // An action rather than an answer, as the About page's folder is:
+        // opening a folder decides nothing.
+        host.register_action(open_themes(), |_, _| {
+            if let Some(folder) = crate::theme::user_themes_directory() {
+                crate::browser::open_folder(&folder);
+            }
+        });
         host.add_settings_page("page", "Appearance", 0, |workspace, _| {
             appearance(workspace)
         });
         Ok(())
     }
+}
+
+/// `crook/appearance/open-themes`: the Themes folder row's Open button.
+fn open_themes() -> ActionName {
+    ActionName::parse("crook/appearance/open-themes").expect("a name built from a literal")
 }
 
 /// Built once and leaked; see `header::manifest`.
@@ -219,9 +233,9 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
                 "Claude Code's permission requests can be read whole and answered from Crook, \
                  with \u{201c}Answer waiting agent\u{201d} or the header\u{2019}s \u{201c}to answer\u{201d}, \
                  while its own dialog stays up in its tab. Needs Crook\u{2019}s plugin for Claude \
-                 Code from v0.1.29 on: `claude plugin update crook@crook` brings an older one up \
-                 to date.",
+                 Code from v0.1.29 on, and this brings an older one up to date:",
             )
+            .with_command("claude plugin update crook@crook")
             .with_keywords(&[
                 "permission", "allow", "deny", "approve", "answer", "agents", "hook", "request",
                 "claude",
@@ -466,15 +480,32 @@ fn theme_category(workspace: &Workspace) -> Vec<Entry> {
                 "path",
                 "file",
             ]);
-            let (folder, is_a_path) = match crate::theme::user_themes_directory() {
-                Some(path) => (path.display().to_string(), true),
+            //
+            // A folder that is there gets the button that opens it, which is
+            // where a theme is dropped; one that is not yet made gets the
+            // button that copies its path, since there is nothing to open.
+            match crate::theme::user_themes_directory() {
+                Some(path) if path.is_dir() => widgets::path_with_control(
+                    themes_folder,
+                    path.display().to_string(),
+                    widgets::text_button(
+                        "Open",
+                        workspace
+                            .host()
+                            .action(&open_themes())
+                            .map(WorkspaceAction::Run),
+                        state.control(named("open-themes")),
+                        ui,
+                    ),
+                    fonts,
+                ),
+                Some(path) => widgets::path(themes_folder, path.display().to_string(), fonts),
                 None => {
                     themes_folder = themes_folder
                         .with_description("This machine has no configuration directory.");
-                    ("nowhere".to_owned(), false)
+                    widgets::fact(themes_folder, "nowhere".to_owned(), false, fonts)
                 }
-            };
-            widgets::fact(themes_folder, folder, is_a_path, fonts)
+            }
         },
     ]
 }

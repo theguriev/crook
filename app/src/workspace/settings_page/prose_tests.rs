@@ -80,3 +80,10 @@ fn a_fold_is_open_after_one_press_and_shut_after_two() {
     prose.toggle(id);
     assert!(!prose.open.borrow().contains(&id));
 }
+
+#[test]
+fn a_copy_of_something_no_button_drew_copies_nothing() {
+    let prose = Prose::default();
+    assert!(!prose.copy(id_of("crook --shell-integration zsh"), &Clipboard::new()));
+    assert_eq!(prose.copied.get(), None);
+}
