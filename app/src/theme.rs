@@ -283,12 +283,13 @@ impl Theme {
     pub const fn derived(accent: Color, terminal: TerminalColors) -> Self {
         let background = terminal.background;
         let foreground = terminal.foreground;
+        let muted = muted(background, foreground);
 
         Self {
             ground: receded(background),
             // The chrome and the grid are one surface. See above.
             surface: background,
-            surface_raised: composite(background, foreground, 5),
+            surface_raised: composite(background, foreground, RAISED_PERCENT),
             // A light theme's overlays darken and a dark theme's lighten,
             // because both are the *foreground* at a percentage — Warp
             // resolves the same ladder the same way, so this is that rule with
@@ -305,8 +306,9 @@ impl Theme {
             // white ground loses contrast much faster than darkening light
             // text on a black one, and 55% — which reads as "quieter" on a
             // dark theme — falls to about 2.5:1 on a light one, under every
-            // threshold there is.
-            text_muted: composite(background, foreground, muted_mix(foreground)),
+            // threshold there is. And further still where a palette's own
+            // text sits close to its background: see `muted`.
+            text_muted: muted,
             accent,
             // The accent at 30%, which is `percent_of_255(30)` — enough to
             // pick a selected run out of a screenful, and translucent enough
@@ -319,7 +321,7 @@ impl Theme {
             // than as part of the palette — "critical" has to be red on every
             // theme — so they come from the theme's own ANSI colours, which is
             // where a theme says what it thinks red is.
-            usage_normal: composite(background, foreground, muted_mix(foreground)),
+            usage_normal: muted,
             usage_elevated: terminal.normal[3],
             usage_high: terminal.bright[3],
             usage_critical: terminal.normal[1],
@@ -343,6 +345,103 @@ pub const TEXT_CONTRAST: f32 = 4.5;
 /// How far muted text is mixed towards the text it is quieter than.
 const fn muted_mix(foreground: Color) -> u8 {
     if luminance(foreground) < 128 { 72 } else { 62 }
+}
+
+/// Muted text for a palette: the [`muted_mix`] blend where it reads, and
+/// otherwise as little further towards the text as reads.
+///
+/// The fixed blend is chosen against Crook's own palettes, whose text is
+/// far from their ground. A palette whose text is already soft — Catppuccin
+/// Latte, Rosé Pine, Everforest — has less contrast to give away, and the
+/// same share of it left muted text at 3:1 or under on the panels it is
+/// drawn on: every description on the settings page, every subtitle. So the
+/// blend is measured against each of the three grounds muted text sits on —
+/// the window's, a pane's and a raised card's — and taken a percent at a
+/// time towards the text until the worst of them reaches
+/// [`MUTED_CONTRAST`]. A palette whose blend already passes keeps it exactly,
+/// which is every one Crook ships of its own; a palette whose text does not
+/// reach it either ends at the text itself, the most that can be done
+/// without inventing a colour.
+const fn muted(background: Color, foreground: Color) -> Color {
+    let grounds = [
+        receded(background),
+        background,
+        composite(background, foreground, RAISED_PERCENT),
+    ];
+    let mut percent = muted_mix(foreground);
+    loop {
+        let candidate = composite(background, foreground, percent);
+        let mut worst = f64::INFINITY;
+        let mut index = 0;
+        while index < grounds.len() {
+            let ratio = contrast_ratio(candidate, grounds[index]);
+            if ratio < worst {
+                worst = ratio;
+            }
+            index += 1;
+        }
+        if worst >= MUTED_CONTRAST || percent >= 100 {
+            return candidate;
+        }
+        percent += 1;
+    }
+}
+
+/// The contrast muted text has to reach on every ground it is drawn on.
+///
+/// WCAG's AA for body text, 1.4.3. Muted text is quieter, not optional: a
+/// description under a setting is what says what the setting does.
+const MUTED_CONTRAST: f64 = 4.5;
+
+/// How far a raised surface is mixed towards the text, in per cent.
+const RAISED_PERCENT: u8 = 5;
+
+/// The WCAG 2.0 contrast ratio between two colours, 1 to 21.
+///
+/// A `const fn`, because [`Theme::derived`] asks it while deriving the
+/// built-in themes at compile time. That is also why it is `f64` and why
+/// the gamma curve is [`gamma`] rather than `powf`, which cannot be called
+/// in one.
+pub(crate) const fn contrast_ratio(left: Color, right: Color) -> f64 {
+    let (left, right) = (relative_luminance(left), relative_luminance(right));
+    let (lighter, darker) = if left > right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// WCAG relative luminance: the sRGB gamma curve undone, then weighted.
+const fn relative_luminance(color: Color) -> f64 {
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+}
+
+/// One sRGB channel, as linear light from 0 to 1.
+const fn linear(channel: u8) -> f64 {
+    let value = channel as f64 / 255.;
+    if value <= 0.03928 {
+        value / 12.92
+    } else {
+        gamma((value + 0.055) / 1.055)
+    }
+}
+
+/// `x` to the power 2.4, for `x` between 0 and 1, in a `const fn`.
+///
+/// `x²·x^0.4`, with `x^0.4` the fifth root of `x²` found by Newton's method:
+/// from 1, above the root for anything at most 1, each step lands closer and
+/// stays above, and forty steps are past the last digit an `f64` holds.
+const fn gamma(x: f64) -> f64 {
+    let square = x * x;
+    let mut root = 1.;
+    let mut step = 0;
+    while step < 40 {
+        let fourth = root * root * root * root;
+        root = (4. * root + square / fourth) / 5.;
+        step += 1;
+    }
+    square * root
 }
 
 /// How bright a colour reads, 0 to 255.

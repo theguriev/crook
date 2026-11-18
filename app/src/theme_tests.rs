@@ -457,3 +457,65 @@ fn a_fill_nothing_reads_on_is_moved_until_something_does() {
     // in, is the colour the palette named.
     assert_eq!(theme.accent, Color::hex(0x8a6fb0));
 }
+
+#[test]
+fn muted_text_reaches_body_text_contrast_on_every_ground_in_every_palette() {
+    // Every description on the settings page and every subtitle is muted
+    // text, drawn on the window's ground, on a pane, and on a raised card.
+    // A palette whose own text is soft — Catppuccin Latte, Rosé Pine — used
+    // to leave it near 3:1 on those; WCAG asks 4.5:1 of text this size.
+    for builtin in BUILTIN {
+        let theme = builtin.theme;
+        for (ground, what) in [
+            (theme.ground, "the ground"),
+            (theme.surface, "a surface"),
+            (theme.surface_raised, "a raised surface"),
+        ] {
+            let ratio = contrast(theme.text_muted, ground);
+            assert!(
+                ratio >= 4.5,
+                "{}: muted text is {ratio:.2}:1 on {what}",
+                builtin.name
+            );
+        }
+        // Still quieter than the text it is muted from, wherever the
+        // palette's text has the room to be.
+        if contrast(theme.text_primary, theme.surface_raised) > 4.6 {
+            assert_ne!(theme.text_muted, theme.text_primary, "{}", builtin.name);
+        }
+    }
+}
+
+#[test]
+fn crooks_own_palettes_keep_the_muted_text_they_had() {
+    // The adjustment is for palettes that need it. Crook's own three already
+    // read, and their look is not to drift by a single step: Crook Dark's is
+    // the colour its author chose, and the two derived ones are the fixed
+    // blend exactly as it was.
+    assert_eq!(DARK.text_muted, Color::hex(0x8a93a3));
+    assert_eq!(builtin::LIGHT.text_muted, Color::hex(0x5d5f66));
+    assert_eq!(builtin::MIDNIGHT.text_muted, Color::hex(0x868a90));
+    for theme in [builtin::LIGHT, builtin::MIDNIGHT] {
+        let terminal = theme.terminal;
+        assert_eq!(
+            theme.text_muted,
+            composite(
+                terminal.background,
+                terminal.foreground,
+                muted_mix(terminal.foreground)
+            )
+        );
+        assert_eq!(theme.usage_normal, theme.text_muted);
+    }
+}
+
+#[test]
+fn the_compile_time_contrast_is_the_wcag_one() {
+    // The ratio the derivation uses has its own gamma curve, because `powf`
+    // cannot run at compile time. Checked against the textbook values.
+    assert!((contrast_ratio(Color::BLACK, Color::WHITE) - 21.).abs() < 1e-9);
+    assert!((contrast_ratio(Color::WHITE, Color::WHITE) - 1.).abs() < 1e-9);
+    // #777777 on white is the classic 4.48:1.
+    let grey = contrast_ratio(Color::hex(0x777777), Color::WHITE);
+    assert!((grey - 4.478).abs() < 0.001, "{grey}");
+}
