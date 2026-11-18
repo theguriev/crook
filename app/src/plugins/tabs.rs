@@ -1445,6 +1445,14 @@ fn rename_entry(
 /// The panel's order rather than most-recent-first, because a person working
 /// down a list of agents wants the list's order back: the chord pressed
 /// three times visits three tabs and not the same two in turn.
+///
+/// A pane with no question held comes before one with a question held, in
+/// that order. The header counts the two apart — a question is "to answer",
+/// and its press opens the list it is answered from — so "1 waiting" pressed
+/// beside "2 to answer" has to land on the one pane that is waiting for some
+/// other reason, and not on whichever asking pane came first. The chord
+/// visits the asking panes as well, once the others have been looked at:
+/// looking at a pane is what stops it waiting.
 pub fn next_waiting(workspace: &Workspace) -> Option<PaneId> {
     let strip = workspace.tabs();
     let looking = workspace.looking_at();
@@ -1459,13 +1467,24 @@ pub fn next_waiting(workspace: &Workspace) -> Option<PaneId> {
         .iter()
         .rposition(|(tab, _, _)| strip.is_active(*tab))
         .map_or(0, |index| index + 1);
-    panes
-        .iter()
-        .cycle()
-        .skip(after_active)
-        .take(panes.len())
-        .find(|(_, _, waiting)| *waiting)
-        .map(|(_, pane, _)| *pane)
+    let in_order = || {
+        panes
+            .iter()
+            .cycle()
+            .skip(after_active)
+            .take(panes.len())
+            .filter(|(_, _, waiting)| *waiting)
+            .map(|(_, pane, _)| *pane)
+    };
+    in_order()
+        .find(|pane| !holds_a_question(workspace, *pane))
+        .or_else(|| in_order().next())
+}
+
+/// Whether a question an agent's hook asked is held in `pane`: the panes the
+/// header's "to answer" speaks for.
+fn holds_a_question(workspace: &Workspace, pane: PaneId) -> bool {
+    workspace.asks().live().any(|ask| ask.pane == pane)
 }
 
 /// How many panes are waiting for a person, which is the number on the chip
@@ -1481,6 +1500,28 @@ pub fn waiting_count(workspace: &Workspace) -> usize {
         .tabs()
         .panes()
         .filter(|(_, pane)| pane.session().is_waiting(looking == Some(pane.id())))
+        .count()
+}
+
+/// How many panes are waiting for a person for some reason other than a
+/// question held in them, which is the number on the chip's "waiting".
+///
+/// The same panes as [`waiting_count`], less the ones [`to_answer_count`]
+/// already speaks for. A question held in a pane makes it waiting as well,
+/// so counted whole the two halves named the same agents twice — three
+/// questions in three tabs read "3 to answer" and "3 waiting", which looks
+/// like six things to do and is three. What is left is what the questions do
+/// not cover: a bell, a pane marked as waiting, an agent that stopped to
+/// ask in its own words.
+pub fn waiting_beyond_questions(workspace: &Workspace) -> usize {
+    let looking = workspace.looking_at();
+    workspace
+        .tabs()
+        .panes()
+        .filter(|(_, pane)| {
+            pane.session().is_waiting(looking == Some(pane.id()))
+                && !holds_a_question(workspace, pane.id())
+        })
         .count()
 }
 
@@ -1560,10 +1601,18 @@ pub fn to_answer_count(workspace: &Workspace) -> usize {
 }
 
 /// The chip in the header: the questions held, whose press opens the list
-/// of them — or the card, when there is one — and after it the waiting
-/// panes, whose press goes to the next one. Each half is there only while it
-/// has something to count, and the chip is nothing at all while neither
-/// has: a count of zero is not information.
+/// of them — or the card, when there is one — and after it the panes waiting
+/// for any other reason, whose press goes to the next one. Each half is there
+/// only while it has something to count, and the chip is nothing at all while
+/// neither has: a count of zero is not information.
+///
+/// Two halves and not one, because they are two different things to do. A
+/// question is answered from the list, without leaving the pane in front of
+/// you; a bell or a pane marked as waiting is only answered by going to look
+/// at it. They count no pane twice — see [`waiting_beyond_questions`] — and
+/// each wears its own mark, the question's circled question mark and the
+/// bell, so that side by side they read as two kinds of thing rather than one
+/// number said twice.
 ///
 /// "To answer" first, because a half turning up shifts the one after it: a
 /// press aimed at where "to answer" was must not land on "N waiting", which
@@ -1573,7 +1622,7 @@ pub fn to_answer_count(workspace: &Workspace) -> usize {
 ///
 /// `go` is the two halves' actions, "to answer" first.
 fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
-    let waiting = waiting_count(workspace);
+    let waiting = waiting_beyond_questions(workspace);
     let asked = to_answer_count(workspace);
     let (live, [asked_hover, waiting_hover]) =
         workspace
@@ -1591,7 +1640,7 @@ fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
     if asked > 0 {
         chip.add_child(pill(
             asked_hover,
-            false,
+            Lucide::CircleQuestionMark,
             format!("{asked} to answer"),
             live.then_some(vec![WorkspaceAction::Run(answers)]),
             ui,
@@ -1602,7 +1651,7 @@ fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
         // keys after a press are kept from it as after the card's Go to.
         chip.add_child(pill(
             waiting_hover,
-            true,
+            Lucide::Bell,
             format!("{waiting} waiting"),
             live.then_some(vec![WorkspaceAction::Run(next), AskAction::HoldKeys.into()]),
             ui,
@@ -1611,12 +1660,12 @@ fn waiting_chip(workspace: &Workspace, go: [ActionId; 2]) -> Box<dyn Element> {
     chip.finish()
 }
 
-/// One half of the chip: a count, with the bell before it when `bell`, that
-/// dispatches `go` in turn when pressed — or, with none, is drawn unlit
-/// under the pointer and has no handler.
+/// One half of the chip: a count, with `mark` before it, that dispatches
+/// `go` in turn when pressed — or, with none, is drawn unlit under the
+/// pointer and has no handler.
 fn pill(
     hover: MouseStateHandle,
-    bell: bool,
+    mark: Lucide,
     label: String,
     go: Option<Vec<WorkspaceAction>>,
     ui: FamilyId,
@@ -1632,13 +1681,11 @@ fn pill(
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(WAITING_GAP);
-        if bell {
-            row.add_child(
-                Icon::new(Lucide::Bell, WAITING_ICON)
-                    .with_color(theme().usage_high)
-                    .finish(),
-            );
-        }
+        row.add_child(
+            Icon::new(mark, WAITING_ICON)
+                .with_color(theme().usage_high)
+                .finish(),
+        );
         row.add_child(
             Text::new(label.clone(), ui, WAITING_TEXT)
                 .with_color(theme().text_primary)
@@ -1650,7 +1697,7 @@ fn pill(
             .with_padding(Padding {
                 top: 3.,
                 bottom: 3.,
-                left: if bell { 8. } else { 9. },
+                left: 8.,
                 right: 9.,
             })
             .finish()
@@ -1669,10 +1716,10 @@ fn pill(
 
 /// The chip's type, the same size as a row's chips in the panel.
 const WAITING_TEXT: f32 = crate::style::text::CAPTION;
-/// Its bell, a little larger than the type beside it so the two read as one
-/// line.
+/// Its marks, a little larger than the type beside them so the two read as
+/// one line.
 const WAITING_ICON: f32 = 13.;
-/// The air between the bell and the count.
+/// The air between a mark and its count, and between the two halves.
 const WAITING_GAP: f32 = 5.;
 /// The corner the chip is cut to, which is the one a row's chips use.
 const WAITING_RADIUS: f32 = crate::style::radius::SMALL;
