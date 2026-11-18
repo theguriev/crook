@@ -86,6 +86,7 @@ use crate::theme::theme;
 use super::action::{BlockAction, WorkspaceAction};
 use super::pane_output::{KeyHold, Keys, Output, Typed, selection_kind};
 use super::terminal_element::{self, CursorRow, Ink, RowMarks, color};
+use super::tooltip::{self, LaidTip, Tip, TipKey, Tips};
 
 /// The gap between a pane's edge and the text inside it.
 ///
@@ -234,7 +235,60 @@ pub struct BlockList {
     /// [`crook/blocks`](crate::plugins::blocks) off leaves no gap where its
     /// button was.
     menu_available: bool,
+    /// What names the two controls, once the pointer has rested on one.
+    tips: Option<BlockTips>,
 }
+
+/// What names a block's controls: the window's cards, and what the copy square
+/// and the dots each say.
+///
+/// The controls are painted by the list rather than built as elements, so the
+/// list is what watches the pointer rest on them and what paints the card —
+/// in its own paint, where it knows where the square is.
+pub(super) struct BlockTips {
+    /// The window's cards.
+    pub(super) tips: Tips,
+    /// The pane the list is drawing, which tells its blocks' controls apart
+    /// from another pane's.
+    pub(super) pane: PaneId,
+    /// What the copy square says.
+    pub(super) copy: Tip,
+    /// What the dots say.
+    pub(super) menu: Tip,
+    /// The card for the control the pointer is resting on, laid out for this
+    /// frame, when it is up.
+    laid: Option<LaidTip>,
+}
+
+impl BlockTips {
+    /// Names the controls of `pane`'s blocks with `copy` and `menu`.
+    pub(super) fn new(tips: Tips, pane: PaneId, copy: Tip, menu: Tip) -> Self {
+        Self {
+            tips,
+            pane,
+            copy,
+            menu,
+            laid: None,
+        }
+    }
+
+    /// The key of one block's control. The block is in it, so the card does not
+    /// carry over to the next block's square when the pointer moves down the
+    /// list: that is a different square, under a different command.
+    fn key(&self, block: BlockId, control: Control) -> TipKey {
+        let name = match control {
+            Control::Copy => BLOCK_COPY_TIP,
+            Control::Menu => BLOCK_MENU_TIP,
+        };
+        TipKey::new(name).of((self.pane, block))
+    }
+}
+
+/// What names a block's copy square, and what `--tooltip` calls it.
+pub(super) const BLOCK_COPY_TIP: &str = "block-copy";
+
+/// What names its dots.
+pub(super) const BLOCK_MENU_TIP: &str = "block-menu";
 
 /// Where one item's rows are painted, and which of them are on screen.
 #[derive(Copy, Clone, Debug)]
@@ -285,6 +339,7 @@ impl BlockList {
             paths: PathsOn::ThisMachine(None),
             menu: None,
             menu_available: false,
+            tips: None,
             size: None,
             origin: None,
             window: Vec::new(),
@@ -813,6 +868,55 @@ impl BlockList {
         self.menu_available = available;
         self.menu = open_on.filter(|_| available);
         self
+    }
+
+    /// Names the controls in a card once the pointer has rested on one.
+    pub fn with_tips(mut self, tips: BlockTips) -> Self {
+        self.tips = Some(tips);
+        self
+    }
+
+    /// The control whose card may be up: the one the pointer is on, or the
+    /// one `--tooltip` named on the hovered block, which no pointer is on.
+    fn tipped_control(&self) -> Option<Control> {
+        self.view.on_control().or_else(|| {
+            let tips = &self.tips.as_ref()?.tips;
+            self.controls().iter().copied().find(|control| {
+                tips.is_pinned(match control {
+                    Control::Copy => BLOCK_COPY_TIP,
+                    Control::Menu => BLOCK_MENU_TIP,
+                })
+            })
+        })
+    }
+
+    /// The key of the control the pointer is on, if it is on one.
+    fn resting_key(&self) -> Option<TipKey> {
+        let tips = self.tips.as_ref()?;
+        let block = self.view.hovered()?;
+        let control = self.view.on_control()?;
+        Some(tips.key(block, control))
+    }
+
+    /// Tells the cards what the pointer did to the controls in an event the
+    /// list has just handled, from where it was on them before.
+    fn follow_tips(&self, before: Option<TipKey>, event: &Event, ctx: &mut EventContext) {
+        let Some(tips) = self.tips.as_ref().map(|tips| &tips.tips) else {
+            return;
+        };
+        let after = self.resting_key();
+        if before != after {
+            let now = Instant::now();
+            if let Some(key) = before {
+                tips.leave(key, now);
+            }
+            if let Some(key) = after {
+                tips.enter(key, now);
+            }
+            ctx.notify();
+        } else if after.is_some() && tooltip::puts_tips_away(event) && tips.put_away() {
+            ctx.notify();
+        }
     }
 
     /// The controls a hovered block carries, outermost last.
@@ -1593,7 +1697,7 @@ impl BlockList {
     /// the button a menu is hanging off must not be one that has just
     /// disappeared. It is also where the menu's own corner is measured from:
     /// see [`PaneBlocks::set_menu_at`].
-    fn paint_control(&self, origin: Vector2F, ctx: &mut PaintContext) {
+    fn paint_control(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         let Some(shown) = self.menu.or_else(|| self.view.hovered()) else {
             self.view.set_menu_at(None);
             return;
@@ -1685,6 +1789,16 @@ impl BlockList {
             }
         }
         ctx.scene.stop_layer();
+
+        // The card, under the control the pointer is resting on — not under a
+        // control a menu is keeping drawn, which is covered by its menu.
+        let on = self.tipped_control().filter(|_| self.menu.is_none());
+        if let Some(control) = on {
+            let bounds = self.control_at(origin, item, control);
+            if let Some(laid) = self.tips.as_mut().and_then(|tips| tips.laid.as_mut()) {
+                laid.paint_beside(bounds, 0., ctx, app);
+            }
+        }
     }
 
     /// Paints the thumb, in the geometry the general-purpose scrollable uses.
@@ -1844,9 +1958,23 @@ impl Element for BlockList {
     fn layout(
         &mut self,
         constraint: SizeConstraint,
-        _: &mut LayoutContext,
-        _: &AppContext,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
     ) -> Vector2F {
+        // The card for the control the pointer is resting on, if it is up. Laid
+        // out against the window, which is what it is placed in.
+        let control = self.tipped_control();
+        let block = self.view.hovered();
+        if let Some(tips) = self.tips.as_mut() {
+            let now = Instant::now();
+            tips.laid = block
+                .zip(control)
+                .filter(|(block, control)| tips.tips.shows(tips.key(*block, *control), now))
+                .map(|(_, control)| match control {
+                    Control::Copy => LaidTip::lay_out(&tips.copy, ctx, app),
+                    Control::Menu => LaidTip::lay_out(&tips.menu, ctx, app),
+                });
+        }
         let size = vec2f(
             bounded(constraint.max.x(), constraint.min.x()),
             bounded(constraint.max.y(), constraint.min.y()),
@@ -1872,7 +2000,7 @@ impl Element for BlockList {
         size
     }
 
-    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, _: &AppContext) {
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         let size = self
             .size
             .expect("a block list was painted before it was laid out");
@@ -1920,7 +2048,7 @@ impl Element for BlockList {
             self.paint_item(origin, item, region, ctx);
             self.window.push(item);
         }
-        self.paint_control(origin, ctx);
+        self.paint_control(origin, ctx, app);
         self.paint_thumb(origin, ctx);
 
         ctx.scene.stop_layer();
@@ -1932,6 +2060,24 @@ impl Element for BlockList {
         ctx: &mut EventContext,
         _: &AppContext,
     ) -> bool {
+        let before = self.resting_key();
+        let handled = self.dispatch(event, ctx);
+        self.follow_tips(before, event.raw_event(), ctx);
+        handled
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
+impl BlockList {
+    /// Handles an event, before the cards are told what it did.
+    fn dispatch(&mut self, event: &DispatchedEvent, ctx: &mut EventContext) -> bool {
         let Some(z_index) = self.z_index() else {
             return false;
         };
@@ -2032,14 +2178,6 @@ impl Element for BlockList {
             Event::MouseDown { .. } => self.press(event, ctx),
             _ => false,
         }
-    }
-
-    fn size(&self) -> Option<Vector2F> {
-        self.size
-    }
-
-    fn origin(&self) -> Option<Point> {
-        self.origin
     }
 }
 

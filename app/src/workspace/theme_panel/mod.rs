@@ -76,6 +76,7 @@ use crate::theme::creator::Draft;
 use crate::theme::theme;
 
 use super::action::{ThemeAction, WorkspaceAction};
+use super::tooltip::TipKey;
 use super::view::Workspace;
 
 /// The panel's width, and the width a row of it lays itself out against.
@@ -248,6 +249,7 @@ fn header(workspace: &Workspace) -> Box<dyn Element> {
                 Lucide::X,
                 Control::Close,
                 ThemeAction::ClosePanel,
+                (CLOSE_TIP, "Close"),
             ))
             .finish(),
     )
@@ -277,14 +279,16 @@ fn title_row(workspace: &Workspace, ui: crookui_core::fonts::FamilyId) -> Box<dy
         )
         .with_child(Expanded::new(1., Empty::new().finish()).finish());
 
-    // Warp's `+` sits beside the title and has no label and no tooltip. It is
-    // hidden while the creator is up, because the creator is what it opens.
+    // Warp's `+` sits beside the title and has no label and no tooltip; this
+    // one names itself once the pointer rests on it. It is hidden while the
+    // creator is up, because the creator is what it opens.
     if !creating {
         row.add_child(icon_button(
             workspace,
             Lucide::Plus,
             Control::Create,
             ThemeAction::StartCreating,
+            (CREATE_TIP, "New theme"),
         ));
     }
 
@@ -308,16 +312,26 @@ fn hint(mode: Mode, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
-/// A square button carrying one icon.
+/// What names the panel's `+`, and what `--tooltip` calls it.
+const CREATE_TIP: TipKey = TipKey::new("new-theme");
+
+/// What names its ×.
+const CLOSE_TIP: TipKey = TipKey::new("close-themes");
+
+/// A square button carrying one icon, and the card that names it.
+///
+/// No chord on the card: neither opening the creator nor closing the panel is
+/// a command a key can be bound to.
 fn icon_button(
     workspace: &Workspace,
     icon: Lucide,
     control: Control,
     action: ThemeAction,
+    (key, label): (TipKey, &str),
 ) -> Box<dyn Element> {
     let state = workspace.theme_panel().control(control);
 
-    Hoverable::new(state, move |mouse| {
+    let button = Hoverable::new(state, move |mouse| {
         let (background, color) = if mouse.is_hovered() {
             (theme().overlay_2, theme().text_primary)
         } else {
@@ -339,7 +353,8 @@ fn icon_button(
         .finish()
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Theme(action)))
-    .finish()
+    .finish();
+    workspace.named(key, label, None).wrap(button).finish()
 }
 
 /// The width a row of the panel has to work with.

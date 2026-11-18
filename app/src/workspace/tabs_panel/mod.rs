@@ -979,6 +979,7 @@ fn heading(
     let name = name.to_owned();
     let close = chrome.close.clone();
     let guard = chrome.close.clone();
+    let close_named = workspace.named(row::CLOSE_GROUP_TIP.of(group), "Close group", None);
     let mark = rollup
         .map(|rollup| rollup.status)
         .filter(|status| *status != AgentStatus::Idle)
@@ -1050,6 +1051,7 @@ fn heading(
                 TabAction::CloseGroup(group),
                 close.clone(),
                 hovered,
+                close_named,
             ))
             .finish(),
         )

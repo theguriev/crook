@@ -25284,10 +25284,16 @@ mod shells {
                     !frame_text(&scene).contains(says),
                     "{says:?} is up with the pointer off the switch"
                 );
-                let switch = icons_in(&scene, find_bar_box(&scene), icon);
+                // Found before the card is up: the card takes the bar's
+                // corner and surface, so with it up there are two of them.
+                let (bar, pane) = (find_bar_box(&scene), panel_boxes(&scene)[0]);
+                let switch = icons_in(&scene, bar, icon);
                 assert_eq!(switch.len(), 1, "one {says:?} switch on the bar");
 
                 harness.move_to(center(switch[0]));
+                harness.frame();
+                // Once the pointer has rested on it: see `tooltip`.
+                harness.workspace_update(|workspace, _| workspace.tips().ripen());
                 let scene = harness.frame();
                 let shown = frame_text(&scene);
                 assert!(
@@ -25301,13 +25307,14 @@ mod shells {
                     .layers()
                     .flat_map(|layer| layer.rects.iter())
                     .filter(|rect| {
-                        rect.corner_radius.get_top_left() == Radius::Pixels(4.)
+                        rect.corner_radius.get_top_left()
+                            == Radius::Pixels(crate::style::radius::MEDIUM)
                             && rect.background == Fill::Solid(theme().surface_raised)
+                            && rect.bounds != bar
                     })
                     .map(|rect| rect.bounds)
                     .collect();
                 assert_eq!(notes.len(), 1, "one note for {says:?}");
-                let (bar, pane) = (find_bar_box(&scene), panel_boxes(&scene)[0]);
                 assert!(
                     notes[0].min_y() > bar.max_y() && notes[0].max_x() <= pane.max_x(),
                     "the note at {:?} is not under the bar at {bar:?} inside the pane at {pane:?}",
@@ -52512,5 +52519,297 @@ mod connecting_agents {
             "Connect Claude Code",
             "Enter on the row did not press Connect"
         );
+    }
+}
+
+/// The cards that name icon-only controls. See [`super::tooltip`].
+mod tooltips {
+    use std::time::Instant;
+
+    use super::super::tooltip::{TIP_DELAY, place};
+    use super::*;
+
+    /// Every name card on a frame: the menus' radius on the raised surface,
+    /// with no menu open to be one.
+    fn cards(scene: &Scene) -> Vec<RectF> {
+        visible_rects(scene)
+            .filter(|(rect, _)| {
+                rect.corner_radius.get_top_left() == Radius::Pixels(crate::style::radius::MEDIUM)
+                    && rect.background == Fill::Solid(theme().surface_raised)
+            })
+            .map(|(_, bounds)| bounds)
+            .collect()
+    }
+
+    /// Lets the card the pointer is resting on come up, as half a second of
+    /// keeping still would.
+    fn ripen(harness: &mut Harness) {
+        harness.workspace_update(|workspace, _| workspace.tips().ripen());
+    }
+
+    /// Rests the pointer on the `+` under the tabs, and hands back where it is.
+    fn rest_on_new_tab(harness: &mut Harness) -> RectF {
+        let plus = new_tab_box(&harness.frame());
+        harness.move_to(center(plus));
+        harness.frame();
+        plus
+    }
+
+    /// What the platform's default chord for a new tab is written as.
+    fn new_tab_chord() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd+t"
+        } else {
+            "ctrl+shift+t"
+        }
+    }
+
+    #[test]
+    fn an_icon_names_itself_only_once_the_pointer_has_rested_on_it() {
+        // A pointer crossing the panel crosses a dozen controls; a card under
+        // each in turn would be a flicker following the hand. Arriving is not
+        // enough — resting is.
+        let mut harness = Harness::new(1);
+        let plus = rest_on_new_tab(&mut harness);
+        let scene = harness.frame();
+        assert!(
+            cards(&scene).is_empty() && !frame_text(&scene).contains("New tab"),
+            "the card came up the moment the pointer arrived"
+        );
+
+        ripen(&mut harness);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(
+            text.contains("New tab") && text.contains(new_tab_chord()),
+            "the `+` does not say what it does and its chord: {text}"
+        );
+        let cards = cards(&scene);
+        assert_eq!(cards.len(), 1, "one card for one control");
+        assert!(
+            cards[0].min_y() > plus.min_y() && cards[0].min_x() < center(plus).x(),
+            "the card at {:?} is not under the `+` at {plus:?}",
+            cards[0]
+        );
+    }
+
+    #[test]
+    fn the_card_comes_up_by_itself_after_the_delay_and_not_before() {
+        // Nothing else asks for a frame while the pointer keeps still, so the
+        // card is only ever drawn if the window wakes itself for it.
+        let mut harness = Harness::new(1);
+        let arrived = Instant::now();
+        rest_on_new_tab(&mut harness);
+        let mut shown_at = None;
+        harness.settle_for(TIP_DELAY * 6, |harness| {
+            if harness.frame_if_asked() && frame_text(&harness.frame()).contains("New tab") {
+                shown_at = Some(Instant::now());
+            }
+            shown_at.is_some()
+        });
+        let shown_at = shown_at.expect("the card never came up by itself");
+        assert!(
+            shown_at.duration_since(arrived) >= TIP_DELAY,
+            "the card came up after {:?}, before the pointer had rested {TIP_DELAY:?}",
+            shown_at.duration_since(arrived)
+        );
+    }
+
+    #[test]
+    fn a_press_a_scroll_or_a_key_puts_the_card_away_until_the_pointer_comes_back() {
+        let unbound = Keystroke::new("f13", Modifiers::default());
+        for (what, event) in [
+            (
+                "press",
+                Event::MouseDown {
+                    button: MouseButton::Left,
+                    position: Vector2F::zero(),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+            ),
+            (
+                "scroll",
+                Event::ScrollWheel {
+                    position: Vector2F::zero(),
+                    delta: ScrollDelta::Lines(vec2f(0., 1.)),
+                    modifiers: Modifiers::default(),
+                },
+            ),
+            (
+                "key",
+                Event::KeyDown {
+                    keystroke: unbound.clone(),
+                    chars: String::new(),
+                    origin: Default::default(),
+                },
+            ),
+        ] {
+            let mut harness = Harness::new(1);
+            let plus = rest_on_new_tab(&mut harness);
+            ripen(&mut harness);
+            assert_eq!(cards(&harness.frame()).len(), 1, "no card to put away");
+
+            // At the `+` itself for the pointer's events, the way a press on
+            // the control is made; only the press goes down, so it opens no
+            // tab.
+            let event = match event {
+                Event::MouseDown {
+                    button,
+                    modifiers,
+                    click_count,
+                    ..
+                } => Event::MouseDown {
+                    button,
+                    position: center(plus),
+                    modifiers,
+                    click_count,
+                },
+                Event::ScrollWheel {
+                    delta, modifiers, ..
+                } => Event::ScrollWheel {
+                    position: center(plus),
+                    delta,
+                    modifiers,
+                },
+                other => other,
+            };
+            harness.dispatch(event);
+            ripen(&mut harness);
+            assert!(
+                cards(&harness.frame()).is_empty(),
+                "a {what} left the card up"
+            );
+
+            // Away and back: the next visit waits its own half second.
+            harness.move_to(vec2f(plus.max_x() + 400., plus.max_y() + 400.));
+            harness.frame();
+            harness.move_to(center(plus));
+            harness.frame();
+            ripen(&mut harness);
+            assert_eq!(
+                cards(&harness.frame()).len(),
+                1,
+                "after a {what}, coming back to the `+` did not bring its card"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_key_puts_the_card_away_too() {
+        // A chord is taken before the element tree sees it, so it is the
+        // window's own answer to the key that has to put the card away.
+        let mut harness = Harness::new(1);
+        rest_on_new_tab(&mut harness);
+        ripen(&mut harness);
+        assert_eq!(cards(&harness.frame()).len(), 1);
+
+        harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/zoom-in" }]"#);
+        harness.press(
+            "u",
+            Modifiers {
+                cmd: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+            "",
+        );
+        assert!(
+            cards(&harness.frame()).is_empty(),
+            "the chord left the card up"
+        );
+    }
+
+    #[test]
+    fn the_card_names_the_chord_the_command_is_bound_to_now() {
+        // Read on the frame the card is built, so a key recorded on the
+        // Keyboard Shortcuts page is the one the card names next.
+        let mut harness = Harness::new(1);
+        harness.bind(
+            r#"[
+                { "command": "-crook/window/new-tab" },
+                { "key": "ctrl+alt+n", "command": "crook/window/new-tab" }
+            ]"#,
+        );
+        rest_on_new_tab(&mut harness);
+        ripen(&mut harness);
+        let text = frame_text(&harness.frame());
+        assert!(
+            text.contains("New tab") && text.contains("ctrl+alt+n"),
+            "the card does not name the rebound chord: {text}"
+        );
+        assert!(
+            !text.contains(new_tab_chord()),
+            "the card still names the chord that was taken off: {text}"
+        );
+    }
+
+    #[test]
+    fn moving_straight_to_a_neighbour_shows_its_card_without_the_wait() {
+        // Somebody reading the controls one by one has waited once already.
+        let mut harness = Harness::new(1);
+        harness.open_theme_panel();
+        let scene = harness.frame();
+        let plus = icons_in(&scene, scene_bounds(), Lucide::Plus);
+        let cross = icons_in(&scene, scene_bounds(), Lucide::X);
+        let plus = *plus
+            .iter()
+            .find(|icon| icon.min_x() > 248.)
+            .expect("the Themes panel's `+`");
+        let cross = *cross
+            .iter()
+            .find(|icon| icon.min_x() > 248.)
+            .expect("the Themes panel's ×");
+
+        harness.move_to(center(cross));
+        harness.frame();
+        ripen(&mut harness);
+        assert!(frame_text(&harness.frame()).contains("Close"));
+
+        harness.move_to(center(plus));
+        let text = frame_text(&harness.frame());
+        assert!(
+            text.contains("New theme"),
+            "the `+` beside a card that was up waited for its own: {text}"
+        );
+    }
+
+    #[test]
+    fn a_card_stays_inside_the_window_and_goes_above_when_there_is_no_room_below() {
+        let window = vec2f(400., 300.);
+        let size = vec2f(120., 24.);
+
+        let at = place(
+            RectF::new(vec2f(380., 10.), vec2f(20., 20.)),
+            size,
+            0.,
+            window,
+        );
+        assert!(at.max_x() <= window.x() - 8., "ran off the right: {at:?}");
+        assert!(at.min_y() > 30., "not under the control: {at:?}");
+
+        let at = place(
+            RectF::new(vec2f(0., 10.), vec2f(20., 20.)),
+            size,
+            0.,
+            window,
+        );
+        assert!(at.min_x() >= 8., "ran off the left: {at:?}");
+
+        let at = place(
+            RectF::new(vec2f(100., 270.), vec2f(20., 20.)),
+            size,
+            0.,
+            window,
+        );
+        assert!(
+            at.max_y() < 270.,
+            "a control at the bottom put its card off the window: {at:?}"
+        );
+    }
+
+    /// The whole window, for a search over every icon on a frame.
+    fn scene_bounds() -> RectF {
+        RectF::new(Vector2F::zero(), WINDOW)
     }
 }

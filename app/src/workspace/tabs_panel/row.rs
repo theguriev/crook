@@ -65,6 +65,7 @@ use super::super::action::{TabMenuAction, WorkspaceAction};
 use super::super::row_content::{
     Chips, DetailSection, RowFacts, detail_card, detail_panes, metadata_line,
 };
+use super::super::tooltip::{Named, TipKey};
 use super::super::view::Workspace;
 use super::super::window_room::WindowRoom;
 use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE};
@@ -251,6 +252,22 @@ pub(super) fn render(
         nth: crate::plugins::tabs::place_ordinal(strip, pane),
     };
 
+    // The chord only on the row it would act on: `close-pane` closes the
+    // focused pane, and printed beside the × of a row it does not reach it
+    // would be saying something untrue about the key. `close-tab` is the
+    // palette's, which closes the active tab.
+    let close_named = match options.granularity {
+        Granularity::Panes => workspace.named(
+            CLOSE_PANE_TIP.of(pane),
+            "Close pane",
+            is_selected.then_some("crook/window/close-pane"),
+        ),
+        Granularity::Tabs => workspace.named(
+            CLOSE_TAB_TIP.of(tab),
+            "Close tab",
+            is_selected.then_some("crook/tabs/close-tab"),
+        ),
+    };
     let close_state = interaction.close.clone();
     let guard = interaction.close.clone();
     let link = interaction.pull_request.clone();
@@ -279,7 +296,12 @@ pub(super) fn render(
                 })
                 .with_child(crate::plugins::tabs::mark(workspace, &row, app))
                 .with_child(Expanded::new(1., body.column).finish())
-                .with_child(close_slot(close_action, close_state.clone(), show_close))
+                .with_child(close_slot(
+                    close_action,
+                    close_state.clone(),
+                    show_close,
+                    close_named,
+                ))
                 .finish(),
             is_selected,
             hovered,
@@ -628,7 +650,17 @@ const STRIPE_RADIUS: f32 = 1.5;
 /// The gap between the stripe and what the row was already drawing.
 const STRIPE_GAP: f32 = 6.;
 
-/// A fixed square, holding the close button or holding nothing.
+/// What names a pane row's ×, and what `--tooltip` calls it.
+pub(super) const CLOSE_PANE_TIP: TipKey = TipKey::new("close-pane");
+
+/// A tab row's.
+pub(super) const CLOSE_TAB_TIP: TipKey = TipKey::new("close-tab");
+
+/// A group heading's.
+pub(super) const CLOSE_GROUP_TIP: TipKey = TipKey::new("close-group");
+
+/// A fixed square, holding the close button or holding nothing, and the card
+/// that names the button.
 ///
 /// A group's heading takes the same one: it is the same gesture on the same
 /// kind of thing, and a second close button drawn a second way is how the two
@@ -637,9 +669,10 @@ pub(super) fn close_slot(
     action: TabAction,
     state: MouseStateHandle,
     visible: bool,
+    named: Named,
 ) -> Box<dyn Element> {
     let inner: Box<dyn Element> = if visible {
-        Hoverable::new(state, move |state| {
+        let button = Hoverable::new(state, move |state| {
             let hovered = state.is_hovered();
             Container::new(
                 Align::new(
@@ -664,7 +697,8 @@ pub(super) fn close_slot(
             .finish()
         })
         .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Tab(action)))
-        .finish()
+        .finish();
+        named.wrap(button).finish()
     } else {
         Empty::new().finish()
     };

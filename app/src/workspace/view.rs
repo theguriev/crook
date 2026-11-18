@@ -117,6 +117,7 @@ use super::tabs_panel::edge::PanelResize;
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
+use super::tooltip::{Named, Tip, TipKey, Tips};
 use super::{body, crash_note, header_toolbar, session_note, tabs_panel};
 use crate::agent::connect::Step;
 
@@ -1317,6 +1318,9 @@ pub struct Workspace {
     /// What the header's chip keeps from one frame to the next. See
     /// [`header_chip`](super::header_chip).
     header_chip: HeaderChip,
+    /// Which icon-only control the pointer is resting on, and since when:
+    /// what every control's name card reads. See [`tooltip`](super::tooltip).
+    tips: Tips,
 }
 
 /// How Claude Code's notification begins when it has a permission dialog up:
@@ -1573,6 +1577,7 @@ impl Workspace {
             ask_list: None,
             keys_held: super::pane_output::KeyHold::default(),
             header_chip: HeaderChip::default(),
+            tips: Tips::default(),
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -3063,6 +3068,49 @@ impl Workspace {
         &self.keybindings
     }
 
+    /// The window's name cards. See [`tooltip`](super::tooltip).
+    pub(super) fn tips(&self) -> &Tips {
+        &self.tips
+    }
+
+    /// The card that names one icon-only control: `label`, then the chord
+    /// that runs `command` when one does.
+    ///
+    /// The chord is looked up on the frame the card is built, as the block
+    /// menu's are, so a key recorded on the Keyboard Shortcuts page is on the
+    /// card the next time it comes up.
+    pub(super) fn named(&self, key: TipKey, label: &str, command: Option<&str>) -> Named {
+        Named {
+            tips: self.tips.clone(),
+            key,
+            tip: self.tip(label, command),
+        }
+    }
+
+    /// What a card says, without the control it names: for a control the
+    /// frame paints rather than builds. See [`Self::named`].
+    pub(super) fn tip(&self, label: &str, command: Option<&str>) -> Tip {
+        let chord = command.and_then(|command| super::block_menu::chord_for(self, command));
+        Tip::new(label, chord, self.fonts().ui)
+    }
+
+    /// The same, with a chord that is a control's own rather than a
+    /// keybinding — the find bar's — or none.
+    pub(super) fn named_with(&self, key: TipKey, label: &str, chord: Option<String>) -> Named {
+        Named {
+            tips: self.tips.clone(),
+            key,
+            tip: Tip::new(label, chord, self.fonts().ui),
+        }
+    }
+
+    /// Keeps the card on every control called `control` up, the way
+    /// `--tooltip` does.
+    pub fn pin_tooltip(&mut self, control: String, ctx: &mut ViewContext<Self>) {
+        self.tips.pin(control);
+        ctx.notify();
+    }
+
     /// Replaces them, which is what re-reading `keybindings.json` does.
     ///
     /// The rules a plugin asked for are put back afterwards, because they are
@@ -3809,6 +3857,12 @@ impl Workspace {
         // The header's chip changed shape in this frame, and has its presses
         // waiting: it is drawn again, live, once.
         if let Some(until) = self.header_chip.take_wake() {
+            Self::wake_at(until, ctx, |_, ctx| ctx.notify());
+        }
+        // A control the pointer has just arrived on, whose card is due once
+        // the pointer has rested there: the frame that shows it is drawn
+        // then, whether or not anything else asks for one.
+        if let Some(until) = self.tips.take_wake() {
             Self::wake_at(until, ctx, |_, ctx| ctx.notify());
         }
         news
@@ -12357,6 +12411,10 @@ impl Workspace {
     /// the sequence is concerned. The window delegate asks once, which is what
     /// this is for.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // Every key puts a name card away, and a bound one never reaches the
+        // element tree that would otherwise do it. The action it runs draws
+        // the frame the card is gone from. See [`tooltip`](super::tooltip).
+        self.tips.put_away();
         // **The question a close asks owns its keys, before even a
         // recording.** It is the one thing that can come up over anything —
         // the desktop asks a window to close whatever is showing in it — and
