@@ -273,6 +273,20 @@ pub(super) const PATH_SIZE: f32 = crate::style::text::CAPTION;
 /// of them, so that the mark does not read as part of the badge.
 const LABEL_GAP: f32 = 8.;
 
+/// The creator's second button, there while an agent is picked: Create, and
+/// then run the agent's line instead of leaving it typed.
+pub(super) const RUN_NOW: &str = "Run now";
+
+/// The sentence over the creator's buttons that says what tells them apart,
+/// for an agent whose line starts with `program`.
+///
+/// Both buttons make the checkout and open its tab; the whole difference is
+/// whether the line that starts the agent is waiting in the new tab or has
+/// already been sent, and two one-word labels cannot carry that alone.
+pub(super) fn run_now_hint(program: &str) -> String {
+    format!("Create only types {program}. {RUN_NOW} runs it.")
+}
+
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
 
@@ -540,7 +554,7 @@ pub(super) enum Control {
     Prompt,
     /// The creator's and the confirmation's "Cancel".
     Cancel,
-    /// The creator's "Start", which runs the agent's line rather than
+    /// The creator's "Run now", which runs the agent's line rather than
     /// leaving it in the composer.
     Start,
     /// The button that does the thing.
@@ -1836,12 +1850,26 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         column.add_child(busy_line(state, "Checking it out…", None, ui));
     }
 
-    // Start only where there is an agent to start. Create stays the button
+    // Run now only where there is an agent to run. Create stays the button
     // the face leads with — the one Enter presses — and leaves the agent's
     // line in the composer for a person to read first.
-    let start = state
-        .picked_agent()
-        .map(|_| ("Start", Some(WorktreeAction::Start)));
+    //
+    // Both make the checkout and open a tab in it, so the second button is
+    // named for the one thing it does that Create does not. It was "Start",
+    // which beside "Create" read as a different thing to make rather than
+    // the same thing made and then run; and since the difference is a line
+    // typed against a line run, it is said in a sentence above the buttons
+    // as well, naming the program the line starts.
+    let start = state.picked_agent().map(|agent| {
+        // The word the line starts with, `claude`, rather than the row's
+        // "Claude Code": it is what the new tab will show typed.
+        column.add_child(
+            Container::new(note(run_now_hint(agent), ui))
+                .with_margin_top(6.)
+                .finish(),
+        );
+        (RUN_NOW, Some(WorktreeAction::Start))
+    });
     column.add_child(button_row(
         workspace,
         start,
