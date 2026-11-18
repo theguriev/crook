@@ -841,6 +841,17 @@ pub struct Workspace {
     divider_drag: DividerDrag,
     /// The drag of the tabs panel's edge, held for the same reason.
     panel_resize: PanelResize,
+    /// Whether the tabs panel is up over the work while the window is too
+    /// narrow to dock it. See [`Self::tabs_panel_folds`].
+    ///
+    /// The window's own and never written down. Folding is about the room
+    /// this window has right now, and the setting is about what the person
+    /// wants with room to spare: a press that opened the panel over a narrow
+    /// window was not a press that changed their mind about the wide one.
+    tabs_drawer_open: bool,
+    /// The pointer over the button the header shows while the tabs are
+    /// folded away. See [`Self::tabs_drawer_button`].
+    tabs_drawer_button: MouseStateHandle,
 
     /// Makes the last session save the one that lands. See
     /// [`Self::save_session`] and [`SaveOrder`].
@@ -1479,6 +1490,8 @@ impl Workspace {
             primary_paste: None,
             divider_drag: DividerDrag::new(),
             panel_resize: PanelResize::new(),
+            tabs_drawer_open: false,
+            tabs_drawer_button: MouseStateHandle::default(),
             session_saves: Arc::default(),
             session_problem: None,
             saves_session: true,
@@ -5242,8 +5255,123 @@ impl Workspace {
     /// to its neighbours. So the column is there whenever a section is
     /// showing, and it is there for the tabs unless it was asked not to be.
     /// See [`GeneralOptions::show_tabs_panel`].
+    ///
+    /// In a window too narrow to dock it the setting is set aside rather than
+    /// changed: the tabs are drawn only while the person has asked for them
+    /// over the work, and they come back to whatever the setting says as
+    /// soon as the window is wide enough again. See [`Self::tabs_panel_folds`].
     pub fn tabs_panel_is_showing(&self) -> bool {
-        self.section.is_some() || self.general().show_tabs_panel
+        if self.section.is_some() {
+            return true;
+        }
+        if self.window_is_narrow() {
+            self.tabs_drawer_open
+        } else {
+            self.general().show_tabs_panel
+        }
+    }
+
+    /// Whether this window is too narrow to dock columns beside its work.
+    /// See [`tabs_panel::LEAST_WORK_WIDTH`] for where the line is and why.
+    ///
+    /// Measured against the panel's own width, so a person who dragged it
+    /// wider folds it a little sooner and one who dragged it narrower keeps
+    /// it a little longer — it is the room the work would be left that
+    /// decides, not the window alone.
+    pub(crate) fn window_is_narrow(&self) -> bool {
+        tabs_panel::window_is_narrow(self.window_size.get().x(), self.tabs_panel_width())
+    }
+
+    /// Whether the tabs are folded out of the window rather than docked
+    /// beside the work: the window is narrow, and it is the tabs that are
+    /// showing in the sidebar.
+    ///
+    /// Only the tabs fold. Every other section *is* its list — the settings'
+    /// pages, the plugins, the store — and folding one away would leave a
+    /// page with no way to its neighbours; those are pages a person reads
+    /// rather than work beside, so they keep their column at any width.
+    ///
+    /// Folded, the panel is reached through the header's button or the
+    /// toggle chord, and comes up *over* the work, with the row of section
+    /// buttons at its foot as always — so Sessions, Settings, Plugins and
+    /// Store are never more than one press away.
+    pub(crate) fn tabs_panel_folds(&self) -> bool {
+        self.section.is_none() && self.window_is_narrow()
+    }
+
+    /// Whether the tabs panel is up over the work rather than beside it.
+    pub(super) fn tabs_panel_floats(&self) -> bool {
+        self.tabs_panel_folds() && self.tabs_drawer_open
+    }
+
+    /// The pointer state of the header's button that opens the folded tabs.
+    pub(super) fn tabs_drawer_button(&self) -> MouseStateHandle {
+        self.tabs_drawer_button.clone()
+    }
+
+    /// Opens the folded tabs over the work, or puts them away again.
+    ///
+    /// Putting them away takes with it what [`Self::set_tabs_panel_shown`]
+    /// takes when the panel is hidden, and for its reason: a popup drawn by a
+    /// list that is not on screen is one nobody can see and nobody can
+    /// dismiss. Nothing is saved either way — see [`Self::tabs_drawer_open`].
+    fn set_tabs_drawer_open(&mut self, open: bool, ctx: &mut ViewContext<Self>) {
+        if self.tabs_drawer_open == open {
+            return;
+        }
+        let was_drawn = self.tabs_panel_is_showing();
+        self.tabs_drawer_open = open;
+        if was_drawn && !self.tabs_panel_is_showing() {
+            self.forget_the_tab_list(ctx);
+        }
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Lets go of everything the tab list was holding, for a list that has
+    /// just stopped being drawn: its menus, its search box and the keyboard
+    /// that box may have had, and the row the pointer was over.
+    fn forget_the_tab_list(&mut self, ctx: &mut ViewContext<Self>) {
+        self.close_menu();
+        self.close_tab_context_menu(ctx);
+        self.forget_section_state();
+        self.panel_search.clear();
+        self.panel_search.set_focused(false);
+    }
+
+    /// Tells the workspace that the window it is drawn in is now a different
+    /// width than `before`, the width it was last laid out at.
+    ///
+    /// The frame's size reaches no view — it is an argument to building the
+    /// scene, and [`Self::window_size_cell`] is written without an update —
+    /// so a window dragged across [`tabs_panel::LEAST_WORK_WIDTH`] would go
+    /// on drawing the columns for the width it had before until something
+    /// else asked for a frame. This is that ask, and it is made only on the
+    /// crossing: every other step of a drag lays the same tree out again.
+    ///
+    /// Crossing either way puts folded tabs away. Narrowing has to, as the
+    /// docked list stops being drawn; widening docks them again by the
+    /// setting, and a person who narrows the window afterwards finds the
+    /// tabs folded rather than floating over the work from some earlier
+    /// press they no longer remember making.
+    pub fn window_width_changed(&mut self, before: f32, ctx: &mut ViewContext<Self>) {
+        let panel = self.tabs_panel_width();
+        let was = tabs_panel::window_is_narrow(before, panel);
+        if was == self.window_is_narrow() {
+            return;
+        }
+        let list_was_drawn = self.section.is_none()
+            && if was {
+                self.tabs_drawer_open
+            } else {
+                self.general().show_tabs_panel
+            };
+        self.tabs_drawer_open = false;
+        if list_was_drawn && !self.tabs_panel_is_showing() {
+            self.forget_the_tab_list(ctx);
+        }
+        self.sync_input_keys();
+        ctx.notify();
     }
 
     /// How wide the tabs panel is drawn. See
@@ -5290,11 +5418,7 @@ impl Workspace {
         }
         general.show_tabs_panel = shown;
         if !shown {
-            self.close_menu();
-            self.close_tab_context_menu(ctx);
-            self.forget_section_state();
-            self.panel_search.clear();
-            self.panel_search.set_focused(false);
+            self.forget_the_tab_list(ctx);
         }
         self.set_general(general, ctx);
         self.sync_input_keys();
@@ -5972,6 +6096,11 @@ impl Workspace {
             return;
         }
         self.section = key;
+        // Tabs that were up over a narrow window's work were the way to this
+        // section's button, and not something to find floating there again
+        // on the way back. Everything else they held goes below, with the
+        // rest of what the list held.
+        self.tabs_drawer_open = false;
         // The menu is a popup about the tab list and it is drawn *inside* the
         // tab list, so a section covering the list takes it off screen. Left
         // open it would be a menu nobody can see and nobody can dismiss —
@@ -12551,6 +12680,15 @@ impl Workspace {
             return Some(action);
         }
 
+        // **Tabs brought up over a narrow window's work go on Escape**, as
+        // every other surface floated over the work does. After the search
+        // box and the tab menus, which are inside the panel and walk back
+        // out one step at a time: the first Escape leaves the box, the next
+        // puts the panel away.
+        if self.tabs_panel_floats() && keystroke.is_bare("escape") {
+            return Some(SettingsAction::CloseTabsDrawer.into());
+        }
+
         // The comment field in the Changes column owns the same two keys
         // while it has the keyboard, for the same reason.
         if self.changes_takes_keys()
@@ -13990,8 +14128,14 @@ impl Workspace {
                 // either. Asking to search the tabs is asking to see them,
                 // so the panel comes back — and stays back, because a column
                 // that vanished again on Escape would be one the person had
-                // to keep finding.
-                self.set_tabs_panel_shown(true, ctx);
+                // to keep finding. In a window too narrow to dock it, it
+                // comes back over the work instead, and the setting is left
+                // for the wide window it is about.
+                if self.tabs_panel_folds() {
+                    self.set_tabs_drawer_open(true, ctx);
+                } else {
+                    self.set_tabs_panel_shown(true, ctx);
+                }
                 self.panel_search.set_focused(true);
                 self.changes.focus_draft(false);
             }
@@ -14142,9 +14286,20 @@ impl Workspace {
                 self.set_general(general, ctx);
             }
             SettingsAction::ToggleTabsPanel => {
-                let shown = !self.general().show_tabs_panel;
-                self.set_tabs_panel_shown(shown, ctx);
+                // Folded, the press is about this window and not the
+                // setting: it brings the tabs up over the work, or puts them
+                // away, and the panel a wider window docks is left as the
+                // person set it. The switch on the Appearance page sends the
+                // same action, but from a section, where nothing folds — so
+                // flipping the setting still flips the setting.
+                if self.tabs_panel_folds() {
+                    self.set_tabs_drawer_open(!self.tabs_drawer_open, ctx);
+                } else {
+                    let shown = !self.general().show_tabs_panel;
+                    self.set_tabs_panel_shown(shown, ctx);
+                }
             }
+            SettingsAction::CloseTabsDrawer => self.set_tabs_drawer_open(false, ctx),
             SettingsAction::ToggleAskBeforeEnding => {
                 let mut general = self.general();
                 general.ask_before_ending_agents = !general.ask_before_ending_agents;
@@ -15333,18 +15488,58 @@ impl Workspace {
         let mut content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        // In a window too narrow to dock them the columns float over the
+        // work instead, at the same edge and in the same order, and the work
+        // keeps the whole width under them. See `Self::window_is_narrow`.
+        let narrow = self.window_is_narrow();
+        let mut floating = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        let mut floats = false;
+        // The tabs are the one column that comes up over the work only when
+        // asked, and goes again on a press beside it: they were folded away
+        // to give the work the room, and a list a person has to close by hand
+        // every time they pick from it would be the column back with extra
+        // steps.
+        let mut drawer = None;
         if let Some(sidebar) = sidebar {
-            content.add_child(tabs_panel::render(self, sidebar));
+            let panel = tabs_panel::render(self, sidebar);
+            if self.tabs_panel_floats() {
+                drawer = Some(
+                    Dismiss::new(panel)
+                        .modal()
+                        .on_dismiss(|ctx, _| {
+                            ctx.dispatch_typed_action(WorkspaceAction::from(
+                                SettingsAction::CloseTabsDrawer,
+                            ))
+                        })
+                        .finish(),
+                );
+            } else {
+                content.add_child(panel);
+            }
         }
         if self.panel.open {
-            content.add_child(super::theme_panel::render(self, app));
+            let themes = super::theme_panel::render(self, app);
+            if narrow {
+                floating.add_child(themes);
+                floats = true;
+            } else {
+                content.add_child(themes);
+            }
         }
         // The Changes column is docked the same way and for the same reason:
         // beside the work rather than over it, whichever section is showing.
         // Right of the Themes panel, so the two sidebars stay together at the
         // edge and the column is the one next to the pane it is about.
         if self.changes.open {
-            content.add_child(super::changes_panel::render(self, app));
+            let changes = super::changes_panel::render(self, app);
+            if narrow {
+                floating.add_child(changes);
+                floats = true;
+            } else {
+                content.add_child(changes);
+            }
         }
         content.add_child(Expanded::new(1., main).finish());
         let content = content.finish();
@@ -15361,15 +15556,30 @@ impl Workspace {
         // Asked even when there is nothing showing: a contribution that has
         // nothing to say answers `None`, which is no overlay at all, and the
         // alternative is the workspace knowing which plugin's surface is up.
-        let mut overlays: Vec<Box<dyn Element>> = self
-            .host
-            .slots()
-            .map(crate::plugins::window::WINDOW_OVERLAY, |build| {
-                build(self, app)
-            })
-            .into_iter()
-            .flatten()
-            .collect();
+        //
+        // Under all of it, the columns a narrow window floats rather than
+        // docks: they are the window's own chrome, and anything a plugin
+        // or a question floats is over the chrome as much as over the work.
+        // The Themes panel and the Changes column first, as they were
+        // opened from the panel and stay up while it is put away; the
+        // folded tabs over them, as a press that brought the tabs up is the
+        // most recent thing asked for.
+        let mut overlays: Vec<Box<dyn Element>> = Vec::new();
+        if floats {
+            overlays.push(floating.finish());
+        }
+        if let Some(drawer) = drawer {
+            overlays.push(drawer);
+        }
+        overlays.extend(
+            self.host
+                .slots()
+                .map(crate::plugins::window::WINDOW_OVERLAY, |build| {
+                    build(self, app)
+                })
+                .into_iter()
+                .flatten(),
+        );
         // Last, so that it is painted over whatever a plugin floats: a
         // palette that was open when the desktop asked the window to close
         // is under the question, and under its modal underlay, rather than
@@ -15712,6 +15922,15 @@ impl TypedActionView for Workspace {
                 // gesture is a thing about one row of it.
                 if self.panel_drag.carrying().is_none() {
                     self.stop_searching();
+                }
+                // Tabs brought up over a narrow window were brought up to
+                // choose one, and a choice made is the drawer's job done: the
+                // tab chosen, or the one the `+` opened, is what the person
+                // wants to see, and it is under the panel.
+                if self.tabs_panel_floats()
+                    && matches!(action, TabAction::Select(_) | TabAction::New)
+                {
+                    self.set_tabs_drawer_open(false, ctx);
                 }
                 // A comment being typed is kept, and the keyboard goes back
                 // to the strip for the same reason the search box's does: a
