@@ -17652,7 +17652,9 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
     );
 
     // The row's glyphs left to right, the label's line and the value's line
-    // together. The stub shaper advances half the font size per glyph — a
+    // together: within a pixel of the lines found above, since a line's
+    // origin is rounded and a glyph's is not, and the value's baseline sits
+    // half a pixel off its label's. The stub shaper advances half the font size per glyph — a
     // label is set at 12 and a monospace value at 10.5 — so a glyph's right
     // edge is its origin plus that.
     let mut glyphs: Vec<(f32, char)> = scene
@@ -17660,8 +17662,8 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
         .flat_map(|layer| layer.glyphs.iter())
         .filter(|glyph| {
             pane.contains_point(glyph.position)
-                && ((glyph.position.y() - origin.y()).abs() < 0.5
-                    || (glyph.position.y() - label_at.y()).abs() < 0.5)
+                && ((glyph.position.y() - origin.y()).abs() <= 1.
+                    || (glyph.position.y() - label_at.y()).abs() <= 1.)
         })
         .filter_map(|glyph| {
             Some((
