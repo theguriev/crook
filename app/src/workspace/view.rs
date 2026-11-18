@@ -4128,18 +4128,11 @@ impl Workspace {
     /// The window has just taken the keyboard.
     ///
     /// Whatever is typed in the moment after is likely to have been meant for
-    /// wherever the keyboard was before — a desktop that answers a close's
-    /// request for attention by focusing the window does it in the middle of
-    /// somebody's sentence in another application — so the question a close
-    /// asks starts its wait before a key can reach End again. See
-    /// [`closing`].
-    ///
-    /// The card an agent's question is answered on waits again too, for the
-    /// keyboard and for the pointer alike. See [`answering`].
+    /// wherever the keyboard was before, so the card an agent's question is
+    /// answered on waits again, for the keyboard and for the pointer alike.
+    /// See [`answering`]. The question a close asks does not: it takes its
+    /// keys at once, and starts on Cancel. See [`closing`].
     pub fn window_focused(&mut self, ctx: &mut ViewContext<Self>) {
-        if let Some(question) = self.closing.as_ref() {
-            question.unsettle(Instant::now());
-        }
         if let Some(card) = self.ask_card.as_ref() {
             card.unsettle(Instant::now());
             self.hold_the_pointer(ctx);
@@ -4168,7 +4161,7 @@ impl Workspace {
         if !self.general().ask_before_ending_agents {
             return false;
         }
-        let Some(question) = Question::about(close, &self.tabs, Instant::now()) else {
+        let Some(question) = Question::about(close, &self.tabs) else {
             return false;
         };
 
@@ -4233,9 +4226,6 @@ impl Workspace {
                 }
                 return;
             }
-            // The wait it restarts was written down when the key was asked
-            // about, and nothing on the card changes.
-            EndingAction::TooSoon => return,
             EndingAction::Cancel | EndingAction::End => {}
         }
         let Some(question) = self.closing.take() else {
@@ -12378,7 +12368,7 @@ impl Workspace {
         // opens until the keyboard has been still for a moment, so that keys
         // typed on after a stray close cannot find it. See [`closing`].
         if let Some(question) = self.closing.as_ref()
-            && let Some(action) = closing::action_for(question, keystroke, Instant::now())
+            && let Some(action) = closing::action_for(question, keystroke)
         {
             return Some(action);
         }
