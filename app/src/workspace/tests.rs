@@ -15166,10 +15166,17 @@ fn the_glyph_setting_changes_the_folded_heading_s_mark_too() {
         "the glyph took the wash with it"
     );
 
+    // Back to the disc, which carries its own smaller bell inside it in the
+    // colour that reads on the amber, rather than the full-size one in it.
     harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Dots));
     let scene = harness.frame();
     let heading = panel_heading(&scene);
-    assert!(heading_glyph(&scene, heading, Lucide::Bell).is_none());
+    let inner = heading_glyph(&scene, heading, Lucide::Bell).expect("the disc lost its bell");
+    assert!(inner.width() < bell.width(), "the disc's bell is full size");
+    assert_eq!(
+        icon_color_at(&scene, inner),
+        crate::theme::theme().mark_on(super::status_color(AgentStatus::NeedsInput))
+    );
     assert!(heading_disc(&scene, heading).is_some());
 }
 
@@ -40685,9 +40692,11 @@ fn pirate_faces(scene: &Scene, bounds: RectF) -> Vec<(RectF, usize)> {
 fn a_mark_a_plugin_took_carries_the_status_on_its_top_corner() {
     // An emoji where the disc was says nothing about the agent behind it, so
     // the status comes back small, top right, where no badge goes: the
-    // pirate for the running row, a dot in its own colour for the two
-    // stopped ones. Idle has nothing to say — its disc was the grey that
-    // said nothing — and gets neither.
+    // pirate for the running row, a dot in its own colour for the row that
+    // needs input, and a cross in its own for the one that failed — three
+    // shapes, so the two stopped ones are not told apart by colour alone.
+    // Idle has nothing to say — its disc was the grey that said nothing —
+    // and gets none of them.
     let mut harness = Harness::marks_one_row_per_status();
 
     let scene = harness.frame();
@@ -40695,6 +40704,11 @@ fn a_mark_a_plugin_took_carries_the_status_on_its_top_corner() {
     let marks = icons_in(&scene, panel_box(&scene), MARK_ICON);
     let pirates = pirate_faces(&scene, panel_box(&scene));
     let pips = status_pips(&scene);
+    // The pip's cross, and not the close button's on the active row.
+    let crosses: Vec<RectF> = icons_in(&scene, panel_box(&scene), Lucide::X)
+        .into_iter()
+        .filter(|bounds| (bounds.width() - crate::plugins::tabs::PIP_PIRATE_SIZE).abs() < 0.5)
+        .collect();
     assert!(
         badge_rings(&scene).is_empty(),
         "a status is drawn in a badge's ring; it has none"
@@ -40703,12 +40717,18 @@ fn a_mark_a_plugin_took_carries_the_status_on_its_top_corner() {
     assert_eq!(pirates.len(), 1, "one running row, one pirate");
     assert_eq!(
         pips.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
-        [AgentStatus::NeedsInput, AgentStatus::Failed].map(super::status_color),
-        "the dots are not needs-input and failed, in that order"
+        [super::status_color(AgentStatus::NeedsInput)],
+        "the one dot is not needs-input's"
+    );
+    assert_eq!(crosses.len(), 1, "one failed row, one cross");
+    assert_eq!(
+        icon_color_at(&scene, crosses[0]),
+        super::status_color(AgentStatus::Failed),
+        "the cross is not in failed's colour"
     );
 
-    let corners = std::iter::once(pirates[0].0).chain(pips.iter().map(|(bounds, _)| *bounds));
-    for (bounds, row) in corners.zip(&rows[1..]) {
+    let corners = [pirates[0].0, pips[0].0, crosses[0]];
+    for (bounds, row) in corners.into_iter().zip(&rows[1..]) {
         assert!(
             row.contains_point(center(bounds)),
             "a status is on the wrong row"
@@ -40809,8 +40829,8 @@ fn status_marks_as_glyphs_draw_a_shape_per_state_where_the_disc_was() {
     );
     for icon in STATUS_GLYPH {
         assert!(
-            status_glyphs(&dots, icon).is_empty(),
-            "{icon:?} was drawn on a row while the marks are dots"
+            full_size_glyphs(&dots, icon).is_empty(),
+            "{icon:?} was drawn in the disc's place while the marks are dots"
         );
     }
 
@@ -40852,10 +40872,119 @@ fn status_marks_as_glyphs_draw_a_shape_per_state_where_the_disc_was() {
     assert_eq!(status_discs(&back).len(), EVERY_STATUS.len());
     for icon in STATUS_GLYPH {
         assert!(
-            status_glyphs(&back, icon).is_empty(),
+            full_size_glyphs(&back, icon).is_empty(),
             "{icon:?} outlived the setting"
         );
     }
+}
+
+/// [`status_glyphs`] drawn at the disc's own size — the "Glyphs" marks — and
+/// not the smaller glyph a disc carries inside it.
+fn full_size_glyphs(scene: &Scene, icon: Lucide) -> Vec<RectF> {
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    status_glyphs(scene, icon)
+        .into_iter()
+        .filter(|bounds| (bounds.width() - diameter).abs() < 0.5)
+        .collect()
+}
+
+/// The glyph cut into each status's disc, in [`EVERY_STATUS`]'s order, while
+/// the window moves: none for idle, none for running — the breath is its
+/// shape — a bell for needs input and a cross for failed.
+const DISC_GLYPH: [Option<Lucide>; 4] = [None, None, Some(Lucide::Bell), Some(Lucide::X)];
+
+/// Which glyph is drawn inside each status disc, in panel order, with the
+/// colour it is drawn in: every icon whose centre is a disc's centre.
+fn glyphs_in_discs(scene: &Scene) -> Vec<Option<(Lucide, Color, RectF)>> {
+    let mut discs = status_discs(scene);
+    discs.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    discs
+        .into_iter()
+        .map(|disc| {
+            scene
+                .layers()
+                .flat_map(|layer| layer.icons.iter())
+                .find(|drawn| {
+                    drawn.bounds != disc && (center(drawn.bounds) - center(disc)).length() < 0.5
+                })
+                .map(|drawn| match drawn.icon_key.mark {
+                    Mark::Icon(icon) => (icon, drawn.color, drawn.bounds),
+                    _ => panic!("something other than a Lucide glyph is in a disc"),
+                })
+        })
+        .collect()
+}
+
+#[test]
+fn every_disc_that_asks_for_a_look_says_why_with_a_shape_as_well_as_a_colour() {
+    // WCAG 1.4.1. Amber and red are the pair a red-green deficiency cannot
+    // separate, so a disc asking for a person and a disc whose agent failed
+    // must be two shapes as well as two colours: a bell and a cross, in a
+    // colour that reads on the fill, and well inside it so the disc is still
+    // a disc. Idle and running carry nothing while the window moves.
+    let mut harness = Harness::one_row_per_status();
+
+    let scene = harness.frame();
+    let glyphs = glyphs_in_discs(&scene);
+    assert_eq!(glyphs.len(), EVERY_STATUS.len(), "a disc per row");
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    for ((status, want), drawn) in EVERY_STATUS.into_iter().zip(DISC_GLYPH).zip(&glyphs) {
+        assert_eq!(
+            drawn.map(|(icon, _, _)| icon),
+            want,
+            "{status:?}'s disc carries the wrong glyph"
+        );
+        if let Some((icon, color, bounds)) = drawn {
+            assert_eq!(
+                *color,
+                crate::theme::theme().mark_on(super::status_color(status)),
+                "{icon:?} is not in the colour that reads on {status:?}'s fill"
+            );
+            assert!(
+                bounds.width() < diameter * 0.7,
+                "{icon:?} is {} wide, too close to the disc's {diameter}",
+                bounds.width()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_running_disc_that_cannot_breathe_carries_a_play_glyph_instead() {
+    // The breath is what tells a running disc from an idle one that is not
+    // grey. With motion reduced it holds still at its full colour, and a
+    // colour alone is what 1.4.1 forbids — so the `play` the "Glyphs" marks
+    // use for running stands in for the movement, and goes again when the
+    // window may move.
+    let mut harness = Harness::one_row_per_status();
+    harness.set_motion(Motion::Reduced);
+
+    let still = glyphs_in_discs(&harness.frame());
+    assert_eq!(
+        still[1].map(|(icon, _, _)| icon),
+        Some(Lucide::Play),
+        "a running disc that holds still has no glyph"
+    );
+    assert_eq!(
+        still
+            .iter()
+            .map(|glyph| glyph.map(|(icon, _, _)| icon))
+            .collect::<Vec<_>>(),
+        [
+            None,
+            Some(Lucide::Play),
+            Some(Lucide::Bell),
+            Some(Lucide::X)
+        ],
+        "holding still changed another state's glyph"
+    );
+
+    harness.set_motion(Motion::Full);
+    assert_eq!(
+        glyphs_in_discs(&harness.frame())[1],
+        None,
+        "the play outlived the reduced motion"
+    );
 }
 
 #[test]

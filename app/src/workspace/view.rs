@@ -9118,7 +9118,7 @@ impl Workspace {
 
     /// Whether nothing in the window moves on its own: the "Motion" setting,
     /// with the desktop's word for [`Motion::System`](crate::settings::Motion::System).
-    fn motion_is_reduced(&self) -> bool {
+    pub(crate) fn motion_is_reduced(&self) -> bool {
         self.general()
             .motion
             .is_reduced(self.desktop_reduces_motion)

@@ -348,6 +348,8 @@ Twenty-two features, and the page that configures them:
   room to say what they are counted from. So a tab whose agent has just committed everything
   still says what it did, rather than going blank at the moment there is most to look at. The
   base itself and a detached checkout keep the plain count.
+  The dot never says what matters by colour alone: an agent waiting on you has a bell inside
+  it and one that failed a cross, each in a colour that reads on the fill.
   One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
   an eye the colour says nothing to, or a screenshot in greyscale. Either way a running agent's
@@ -357,10 +359,11 @@ Twenty-two features, and the page that configures them:
   without a compositor, entirely covered — Windows and a compositor do not say when a window
   is behind others. **Motion**, on the same page, keeps the marks and the caret still:
   *System*, the default, does as the desktop's own reduce motion switch says (macOS, Windows,
-  and GNOME's animations), and *Reduced* and *Full* say it for Crook alone. A caret left alone
+  and GNOME's animations), and *Reduced* and *Full* say it for Crook alone. A running dot that
+  holds still carries a play mark instead, so it is still told from an idle one. A caret left alone
   for ten seconds stops blinking either way. A row whose mark a plugin has taken keeps its
   status on the mark's corner instead: the PowerBook Duo pirate grinning while the agent
-  works, a dot in the status colour while it waits or after it failed.
+  works, a dot in the status colour while it waits, and a cross in its own after it failed.
   Under that space is a `+`, which is where Warp's browser puts the one that opens another tab.
   A new tab starts where the focused pane is working, not where Crook itself was started — from
   the Dock, that would be your home directory every time.

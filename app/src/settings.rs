@@ -279,15 +279,20 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
 ///
 /// Crook's own; Warp has a glyph in every row's mark and a status ring on its
 /// corner, so it never had to choose. The disc is the default because a fresh
-/// install should open looking like Warp's, and the glyphs are for the person
-/// the disc says nothing to: one who cannot tell violet from grey, a
-/// screenshot in greyscale, or a row washed amber where an amber dot
-/// disappears. Either way the colour is the same, so a person who reads both
-/// loses nothing by switching.
+/// install should open looking like Warp's. The disc does not lean on its
+/// colour alone for what matters — a state that wants a look carries a glyph
+/// inside it, WCAG's 1.4.1 — but the glyphs are larger and give every state a
+/// shape, idle included, for the person who would rather read shapes than
+/// discs: one who cannot tell violet from grey, a screenshot in greyscale, or
+/// a row washed amber where an amber dot disappears. Either way the colour is
+/// the same, so a person who reads both loses nothing by switching.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusMarks {
-    /// A filled disc in the status colour, and nothing else.
+    /// A filled disc in the status colour, with a small glyph cut into it for
+    /// the states that want a look — a bell for needs input, a cross for
+    /// failed, and a play for running while the window holds still — so the
+    /// colour is never the only thing that tells them apart.
     #[default]
     Dots,
     /// A small glyph per state in the same colour: a shape that reads where a
