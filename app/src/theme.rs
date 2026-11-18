@@ -184,6 +184,28 @@ impl Theme {
             .unwrap_or(self.text_primary)
     }
 
+    /// The ink a failed block says how it ended in, over `behind` — the
+    /// block's own ground, red wash and all.
+    ///
+    /// The terminal's red wherever it reads as text there, which is the same
+    /// red as the stripe down the block's edge, so the words and the stripe
+    /// are one mark rather than two. That is every palette shipped: Crook Dark's
+    /// red was lifted to 4.5:1 on its grid for `ls`'s sake, and Crook Light's
+    /// is the darkened set made for paper. A theme somebody else wrote may
+    /// carry a red that only works as a fill, and the caption is eleven pixels
+    /// tall, so where the red falls short of WCAG's 4.5:1 for text the
+    /// palette's `text_primary` says it instead — the glyph and the stripe
+    /// still carry the colour, and the words are still read.
+    pub fn failure_ink(&self, behind: Color) -> Color {
+        const LEGIBLE: f32 = 4.5;
+        let red = self.terminal.normal[1];
+        if creator::contrast(red, behind) >= LEGIBLE {
+            red
+        } else {
+            self.text_primary
+        }
+    }
+
     /// Fills in every role a theme file does not carry.
     ///
     /// Warp's theme files name a handful of colours — an accent, a background,

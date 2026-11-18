@@ -873,3 +873,169 @@ fn a_block_s_controls_hide_the_line_they_sit_on_and_cut_no_row_under_it_at_any_s
         font_size += FONT_SIZE_STEP / 2.;
     }
 }
+
+#[test]
+fn a_duration_is_said_to_the_tenth_then_the_second_then_the_minute() {
+    use std::time::Duration;
+
+    let said = |millis: u64| took(Duration::from_millis(millis));
+    assert_eq!(said(0), None);
+    assert_eq!(said(999), None, "under a second is noise on every block");
+    assert_eq!(said(1_000).as_deref(), Some("1.0s"));
+    assert_eq!(said(2_345).as_deref(), Some("2.3s"));
+    assert_eq!(
+        said(59_970).as_deref(),
+        Some("59.9s"),
+        "cut down, never rounded up into a 60.0s"
+    );
+    assert_eq!(said(60_000).as_deref(), Some("1m 00s"));
+    assert_eq!(said(64_900).as_deref(), Some("1m 04s"));
+    assert_eq!(said(3_599_000).as_deref(), Some("59m 59s"));
+    assert_eq!(said(3_600_000).as_deref(), Some("1h 00m"));
+    assert_eq!(said(3_720_000).as_deref(), Some("1h 02m"));
+    assert_eq!(said(30 * 3_600_000).as_deref(), Some("30h 00m"));
+}
+
+#[test]
+fn a_failed_block_says_its_exit_status_and_a_successful_one_says_nothing() {
+    // `exit 0` on every block would be a word on every block telling nobody
+    // anything, and Ctrl-C's 130 and SIGPIPE's 141 are not failures. A shell
+    // makes 128 plus the signal's number out of a command a signal ended.
+    let mut emulator = emulator();
+    for exit in [0, 1, 130, 141, 139, 137, 200] {
+        cycle(&mut emulator, "run", "out", exit);
+    }
+    let said: Vec<_> = emulator
+        .blocks()
+        .iter()
+        .map(|block| caption_of(block).and_then(|caption| caption.ended))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            None,
+            Some("exit 1".to_owned()),
+            None,
+            None,
+            Some("exit 139 (SIGSEGV)".to_owned()),
+            Some("exit 137 (SIGKILL)".to_owned()),
+            Some("exit 200".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_block_that_ran_a_second_says_how_long_and_a_quick_one_says_nothing() {
+    use std::time::Duration;
+
+    let mut emulator = emulator();
+    cycle(&mut emulator, "run", "out", 0);
+    let quick = finished(&emulator).clone();
+    let started = Instant::now();
+    let timed = |millis: u64| Block {
+        started_at: Some(started),
+        finished_at: Some(started + Duration::from_millis(millis)),
+        ..quick.clone()
+    };
+
+    assert_eq!(caption_of(&timed(300)), None);
+    assert_eq!(
+        caption_of(&timed(2_300)),
+        Some(Caption {
+            ended: None,
+            took: Some("2.3s".to_owned())
+        })
+    );
+    // A block with no command is not a command, and has no space under it.
+    let bare = Block {
+        command: None,
+        exit: Some(1),
+        ..timed(2_300)
+    };
+    assert_eq!(caption_of(&bare), None);
+}
+
+/// Where a failed block's caption lands, hovered and not, at every size the
+/// font can be set to.
+///
+/// A command that printed nothing is a prompt line and the space around it,
+/// and the 26 px controls reach down into the space under it, which is where
+/// the caption is. The caption moves left of them while they are drawn; it
+/// never moves up or down, and the block is the same height either way.
+#[test]
+fn a_caption_stays_clear_of_the_controls_and_never_moves_the_block() {
+    use crate::settings::{FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE};
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    cycle(&mut emulator, "false", "", 1);
+    let history = Arc::new(BlockHistory::new(emulator.blocks().to_vec(), 0));
+    let snapshot = emulator.snapshot();
+    let id = finished(&emulator).id;
+
+    let mut font_size = MIN_FONT_SIZE;
+    while font_size <= MAX_FONT_SIZE {
+        let laid_out = |hovered: bool| {
+            let font = crate::terminal_font::CellFont::headless(font_size);
+            let size = vec2f(600., 40. * font.metrics().height);
+            let view = PaneBlocks::new();
+            if hovered {
+                view.hover(Some(id), None);
+            }
+            let mut list =
+                BlockList::new(history.clone(), snapshot.clone(), font, view).with_menu(true, None);
+            list.size = Some(size);
+            list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+            list.measure(size);
+            let item = list.window.first().copied().expect("the block is in view");
+            let origin = list.bounds().expect("the list has bounds").origin();
+            // What a laid-out caption is the size of: `exit 1` and a cross,
+            // one line of the type it is set in at this size.
+            let line = caption_type(list.font.metrics().height)
+                * crookui_core::fonts::DEFAULT_UI_LINE_HEIGHT_RATIO;
+            let at = list.caption_at(origin, item, vec2f(48., line));
+            (list, item, origin, at)
+        };
+        let at = format!("at {font_size} pt");
+
+        let (list, item, origin, still) = laid_out(false);
+        let still = still.unwrap_or_else(|| panic!("{at} the caption is not drawn"));
+        let width = list.size.expect("laid out").x();
+        assert_eq!(
+            still.max_x(),
+            width - CONTROL_INSET,
+            "{at} the caption is not under the controls' right edge"
+        );
+        assert!(
+            still.min_y()
+                >= origin.y() + item.top + item.height
+                    - PADDING_BOTTOM * list.font.metrics().height
+                    - 1.
+                && still.max_y() <= origin.y() + item.top + item.height + 1.,
+            "{at} the caption at {still:?} is not in the space under the block's rows"
+        );
+
+        let (list, hovered_item, origin, moved) = laid_out(true);
+        assert_eq!(
+            hovered_item.height, item.height,
+            "{at} hovering changed the block's height"
+        );
+        let plates = list
+            .plates(origin, hovered_item)
+            .expect("controls are drawn");
+        if let Some(moved) = moved {
+            assert_eq!(
+                moved.min_y(),
+                still.min_y(),
+                "{at} the caption moved up or down"
+            );
+            assert!(
+                moved.intersection(plates).is_none(),
+                "{at} the caption at {moved:?} is under the controls at {plates:?}"
+            );
+        }
+
+        font_size += FONT_SIZE_STEP / 2.;
+    }
+}

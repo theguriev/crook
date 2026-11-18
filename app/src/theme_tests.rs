@@ -362,3 +362,40 @@ fn a_mark_on_the_accent_reads_there_in_every_builtin_palette() {
         .theme;
     assert_ne!(light.on_accent_mark(), light.text_primary);
 }
+
+#[test]
+fn a_failed_block_says_how_it_ended_in_its_stripe_s_red_where_that_reads() {
+    // The caption under a failed block is eleven pixels of text on the grid
+    // washed a tenth red. Crook's own two palettes put it in the same red as
+    // the stripe, at WCAG's 4.5:1 for text or better; the duration beside it
+    // is in the muted ink, which has to read on the same ground.
+    for name in ["Crook Dark", "Crook Light"] {
+        let theme = builtins()
+            .into_iter()
+            .find(|available| available.name == name)
+            .expect("the palette ships")
+            .theme;
+        let red = theme.terminal.normal[1];
+        let behind = composite(theme.terminal.background, red, 10);
+        let ink = theme.failure_ink(behind);
+        assert_eq!(ink, red, "{name}: the failure is not in the stripe's red");
+        assert!(
+            contrast(ink, behind) >= 4.5,
+            "{name}: the failure is {:.2}:1 on its block",
+            contrast(ink, behind)
+        );
+        assert!(
+            contrast(theme.text_muted, behind) >= 4.5,
+            "{name}: the duration is {:.2}:1 on a failed block",
+            contrast(theme.text_muted, behind)
+        );
+    }
+
+    // A red that only works as a fill gives the words to the palette's text.
+    let mut washed_out = DARK;
+    washed_out.terminal.normal[1] = washed_out.terminal.background;
+    assert_eq!(
+        washed_out.failure_ink(washed_out.terminal.background),
+        washed_out.text_primary
+    );
+}

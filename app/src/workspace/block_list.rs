@@ -56,15 +56,17 @@
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crook_terminal::{
     Block, BlockId, CellSide, ImagePlacement, Rows, SelectionKind, Snapshot, SnapshotCell,
 };
 use crookui_core::AppContext;
-use crookui_core::element::{Element, SizeConstraint};
+use crookui_core::element::{Element, ParentElement as _, SizeConstraint};
+use crookui_core::elements::{CrossAxisAlignment, Flex, Icon, MainAxisSize, Text};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
-use crookui_core::geometry::{Point, RectF, Vector2F, vec2f};
+use crookui_core::fonts::{DEFAULT_UI_LINE_HEIGHT_RATIO, FamilyId};
+use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::icons::{IconKey, Lucide};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::{ClipBounds, CornerRadius, PointerShape, Radius, Scene};
@@ -237,6 +239,12 @@ pub struct BlockList {
     menu_available: bool,
     /// What names the two controls, once the pointer has rested on one.
     tips: Option<BlockTips>,
+    /// The interface's own family, which a finished block's caption is set
+    /// in. `None` draws no captions at all — see [`Self::with_captions`].
+    caption_font: Option<FamilyId>,
+    /// The caption of each finished block in view that has one, laid out by
+    /// layout and painted by paint, keyed by the item's index in the list.
+    captions: Vec<(usize, Box<dyn Element>)>,
 }
 
 /// What names a block's controls: the window's cards, and what the copy square
@@ -340,6 +348,8 @@ impl BlockList {
             menu: None,
             menu_available: false,
             tips: None,
+            caption_font: None,
+            captions: Vec::new(),
             size: None,
             origin: None,
             window: Vec::new(),
@@ -917,6 +927,107 @@ impl BlockList {
         } else if after.is_some() && tooltip::puts_tips_away(event) && tips.put_away() {
             ctx.notify();
         }
+    }
+
+    /// Sets each finished block's caption — how it ended, and how long it
+    /// ran — in `font`, the interface's own family rather than the grid's.
+    ///
+    /// Chrome rather than output, so it is in the type the rest of the
+    /// chrome is in: a caption in the monospace would read as a line the
+    /// command printed.
+    pub fn with_captions(mut self, font: FamilyId) -> Self {
+        self.caption_font = Some(font);
+        self
+    }
+
+    /// The block whose controls are drawn this frame: the one whose menu is
+    /// up, or else the hovered one.
+    fn controls_shown_on(&self) -> Option<BlockId> {
+        self.menu.or_else(|| self.view.hovered())
+    }
+
+    /// Where an item's caption of `size` goes, or `None` where it does not go
+    /// at all.
+    ///
+    /// **In the space under the block's last row, at its right edge** — under
+    /// the output rather than on the prompt line. The prompt line is the
+    /// shell's own text, as wide as `PS1` and the command make it, and a
+    /// prompt with a right-hand side (a clock, a branch, powerlevel10k's
+    /// whole right half) already fills the end of it; the padding below the
+    /// last row is the one part of a block nothing prints into. And it is
+    /// read last, which is where "how it ended" belongs.
+    ///
+    /// Right-aligned to the controls' own right edge, so the two read as one
+    /// column of chrome. A short block's controls reach down into that space —
+    /// a command that printed nothing is a prompt line and its padding, and
+    /// the plates are 26 px tall — so while they are drawn on this block the
+    /// caption moves left of them rather than under them, and is left out
+    /// when there is no room left of them. It never moves up or down, and
+    /// the block never changes height for it: hovering a block moves nothing
+    /// but the caption.
+    fn caption_at(&self, origin: Vector2F, item: Visible, size: Vector2F) -> Option<RectF> {
+        let block = self.block(item.index)?;
+        // A block with no command has no padding under it to hold one.
+        block.command.as_ref()?;
+        let width = self.size.unwrap_or_default().x();
+        let height = self.font.metrics().height;
+        let bottom = origin.y() + item.top + item.height;
+        let band = PADDING_BOTTOM * height;
+        let top = bottom - band + (band - size.y()) / 2.;
+        let mut right = origin.x() + width - CONTROL_INSET;
+        if self.controls_shown_on() == Some(block.id)
+            && let Some(plates) = self.plates(origin, item)
+            && plates.max_y() + CAPTION_CLEARANCE > top
+            && plates.min_y() - CAPTION_CLEARANCE < top + size.y()
+        {
+            right = right.min(plates.min_x() - CAPTION_CLEARANCE);
+        }
+        let left = right - size.x();
+        (left >= origin.x() + GUTTER).then(|| RectF::new(vec2f(left, top), size))
+    }
+
+    /// Lays out the caption of every finished block in view that has one.
+    fn lay_out_captions(&mut self, ctx: &mut LayoutContext, app: &AppContext) {
+        self.captions.clear();
+        let Some(font) = self.caption_font else {
+            return;
+        };
+        let ground = color(self.snapshot.background);
+        let unbounded = SizeConstraint::new(Vector2F::zero(), Vector2F::splat(f32::INFINITY));
+        for item in &self.window {
+            let Some(caption) = self.block(item.index).and_then(|block| caption_of(block)) else {
+                continue;
+            };
+            let mut element = caption_element(
+                &caption,
+                font,
+                caption_type(self.font.metrics().height),
+                ground,
+            );
+            element.layout(unbounded, ctx, app);
+            self.captions.push((item.index, element));
+        }
+    }
+
+    /// Paints the captions layout laid out, each where [`Self::caption_at`]
+    /// puts it.
+    fn paint_captions(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        let mut captions = std::mem::take(&mut self.captions);
+        for (index, element) in &mut captions {
+            let Some(item) = self
+                .window
+                .iter()
+                .find(|item| item.index == *index)
+                .copied()
+            else {
+                continue;
+            };
+            let size = element.size().unwrap_or_default();
+            if let Some(at) = self.caption_at(origin, item, size) {
+                element.paint(at.origin(), ctx, app);
+            }
+        }
+        self.captions = captions;
     }
 
     /// The controls a hovered block carries, outermost last.
@@ -1698,7 +1809,7 @@ impl BlockList {
     /// disappeared. It is also where the menu's own corner is measured from:
     /// see [`PaneBlocks::set_menu_at`].
     fn paint_control(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
-        let Some(shown) = self.menu.or_else(|| self.view.hovered()) else {
+        let Some(shown) = self.controls_shown_on() else {
             self.view.set_menu_at(None);
             return;
         };
@@ -1943,6 +2054,176 @@ fn verdict_of(block: &Block) -> Verdict {
     }
 }
 
+/// What a finished block's caption says: how it ended, and how long it ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Caption {
+    /// `exit 1`, on a block that failed. Nothing on one that did not: a
+    /// session of `exit 0` under every command is a word on every block that
+    /// tells nobody anything, and Ctrl-C's 130 and SIGPIPE's 141 are not
+    /// failures either — see [`verdict_of`].
+    ended: Option<String>,
+    /// `2.3s`, when it ran for a second or more. See [`took`].
+    took: Option<String>,
+}
+
+/// A finished block's caption, or `None` when it has nothing to say.
+///
+/// **The failure is said in words, not only in red.** The stripe and the wash
+/// are colour alone, which is all a person who cannot tell that red from the
+/// ground has to go on (WCAG 1.4.1), and neither says *which* status — a
+/// `grep` that found nothing and a compiler that crashed are the same red.
+fn caption_of(block: &Block) -> Option<Caption> {
+    block.command.as_ref()?;
+    let ended = match (verdict_of(block), block.exit) {
+        (Verdict::Failed, Some(status)) => Some(ended(status)),
+        _ => None,
+    };
+    let took = block.duration().and_then(took);
+    (ended.is_some() || took.is_some()).then_some(Caption { ended, took })
+}
+
+/// `exit 1`, or `exit 139 (SIGSEGV)` for a status a shell made out of a
+/// signal.
+///
+/// A shell reports a command a signal ended as 128 plus the signal's number,
+/// and a crash is easier to read as `SIGSEGV` than as 139. Only the signals
+/// whose numbers are the same on Linux and on macOS are named — `SIGBUS` and
+/// the user signals are numbered differently on the two, and the block may
+/// have run on either side of an `ssh` — and the number is always kept,
+/// because a program is free to exit with 137 on its own.
+fn ended(status: i32) -> String {
+    const SIGNALS: [(i32, &str); 12] = [
+        (1, "SIGHUP"),
+        (2, "SIGINT"),
+        (3, "SIGQUIT"),
+        (4, "SIGILL"),
+        (5, "SIGTRAP"),
+        (6, "SIGABRT"),
+        (8, "SIGFPE"),
+        (9, "SIGKILL"),
+        (11, "SIGSEGV"),
+        (13, "SIGPIPE"),
+        (14, "SIGALRM"),
+        (15, "SIGTERM"),
+    ];
+    match SIGNALS
+        .iter()
+        .find(|(number, _)| status > 128 && status - 128 == *number)
+    {
+        Some((_, name)) => format!("exit {status} ({name})"),
+        None => format!("exit {status}"),
+    }
+}
+
+/// How long a command ran, the way the caption says it: `2.3s`, `1m 04s`,
+/// `1h 02m` — or `None` under a second.
+///
+/// Under a second is nothing at all rather than `0.2s`: nearly every command
+/// takes that long, and a number on every block is a column of noise that
+/// hides the one that took four minutes. Tenths up to a minute, because the
+/// difference between 1.2 s and 1.9 s is the difference people time a build
+/// for; whole seconds past it, whole minutes past an hour. Cut down rather
+/// than rounded, so 59.97 s is `59.9s` and never a `60.0s` that should have
+/// been `1m 00s`. The second field is two digits, so a column of them lines
+/// up.
+fn took(span: Duration) -> Option<String> {
+    let seconds = span.as_secs();
+    if seconds == 0 {
+        return None;
+    }
+    let (hours, minutes) = (seconds / 3600, seconds / 60 % 60);
+    Some(match (hours, minutes) {
+        (0, 0) => format!("{seconds}.{}s", span.subsec_millis() / 100),
+        (0, minutes) => format!("{minutes}m {:02}s", seconds % 60),
+        (hours, minutes) => format!("{hours}h {minutes:02}m"),
+    })
+}
+
+/// A caption as an element: the failure in the stripe's red behind a cross,
+/// then the duration in the muted ink every other caption in the
+/// application is in.
+///
+/// `ground` is the grid's, which a failed block is washed over in red; the
+/// failure's ink is chosen against the two together, because that is what
+/// the words are drawn on.
+fn caption_element(
+    caption: &Caption,
+    font: FamilyId,
+    size: f32,
+    ground: Color,
+) -> Box<dyn Element> {
+    let icon = size * CAPTION_ICON / CAPTION_TEXT;
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CAPTION_GAP);
+    if let Some(ended) = &caption.ended {
+        let red = theme().terminal.normal[1];
+        let ink = theme().failure_ink(washed(ground, red.with_alpha(WASH_ALPHA)));
+        row.add_child(Icon::new(Lucide::CircleX, icon).with_color(ink).finish());
+        row.add_child(
+            Text::new(ended.clone(), font, size)
+                .with_color(ink)
+                .finish(),
+        );
+    }
+    if let Some(took) = &caption.took {
+        // A little more air before the duration than inside the failure,
+        // so `exit 1` and `2.3s` read as two facts rather than one phrase.
+        if caption.ended.is_some() {
+            row.add_child(crookui_core::elements::Empty::new().finish());
+        }
+        row.add_child(
+            Text::new(took.clone(), font, size)
+                .with_color(theme().text_muted)
+                .finish(),
+        );
+    }
+    row.finish()
+}
+
+/// `wash` laid over `ground` at its own alpha: the colour a translucent fill
+/// actually comes out as, which is what a contrast against it has to be
+/// measured on.
+fn washed(ground: Color, wash: Color) -> Color {
+    let mix = |under: u8, over: u8| {
+        let alpha = u16::from(wash.a);
+        ((u16::from(under) * (255 - alpha) + u16::from(over) * alpha + 127) / 255) as u8
+    };
+    Color::rgb(
+        mix(ground.r, wash.r),
+        mix(ground.g, wash.g),
+        mix(ground.b, wash.b),
+    )
+}
+
+/// The caption's type: the chrome's caption size, the size of a tab row's
+/// chips and a setting's description.
+const CAPTION_TEXT: f32 = 11.;
+/// How large a caption's type is under rows `row` px tall.
+///
+/// [`CAPTION_TEXT`] at the default size and anything larger. The caption
+/// lives in the one line of space under a block's last row, and that line is
+/// a row tall: from about 10 pt down a row is shorter than eleven-pixel type
+/// and its line, and a caption at full size would hang up into the last row
+/// of output, over whatever is printed at its end. So below that the type
+/// shrinks with the rows, the way everything else in the pane already has,
+/// and its line stays inside the space it is drawn in.
+fn caption_type(row: f32) -> f32 {
+    CAPTION_TEXT.min(row * CAPTION_FILL / DEFAULT_UI_LINE_HEIGHT_RATIO)
+}
+
+/// How much of the space under a block's last row a caption's line may take.
+const CAPTION_FILL: f32 = 0.8;
+
+/// The cross before a failure, a point larger than the type beside it so
+/// the two read as one line.
+const CAPTION_ICON: f32 = 12.;
+/// The air between the parts of a caption.
+const CAPTION_GAP: f32 = 4.;
+/// How far a caption stays from the controls when they are drawn beside it.
+const CAPTION_CLEARANCE: f32 = 8.;
+
 /// What a block's chrome says about it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -1997,6 +2278,7 @@ impl Element for BlockList {
         self.output.laid_out(self.snapshot.columns);
 
         self.measure(size);
+        self.lay_out_captions(ctx, app);
         size
     }
 
@@ -2048,6 +2330,7 @@ impl Element for BlockList {
             self.paint_item(origin, item, region, ctx);
             self.window.push(item);
         }
+        self.paint_captions(origin, ctx, app);
         self.paint_control(origin, ctx, app);
         self.paint_thumb(origin, ctx);
 
