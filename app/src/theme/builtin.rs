@@ -69,8 +69,8 @@ pub const BUILTIN: [Builtin; 3 + OMARCHY.len()] = {
 ///
 /// The xterm values, which are also what `crook_terminal`'s own default
 /// palette holds, and what the [theme creator](super::creator) gives a
-/// generated theme whose grid they read best on. Crook's own dark themes keep
-/// the bright half and replace this one with [`DARK_NORMAL`].
+/// generated theme whose grid they read best on. Crook's own dark themes
+/// replace both halves, with [`DARK_NORMAL`] and [`DARK_BRIGHT`].
 pub(super) const ANSI_NORMAL: [Color; 8] = [
     Color::hex(0x000000),
     Color::hex(0xcd0000),
@@ -106,8 +106,7 @@ pub(super) const ANSI_BRIGHT: [Color; 8] = [
 ///
 /// Black stays black. On a dark grid it is the colour a program fills behind
 /// light text, or inks dark text with on a coloured fill, and both need it
-/// dark. The bright half is not touched: it is still [`ANSI_BRIGHT`], which is
-/// what the tab colour swatches are drawn from.
+/// dark. The bright half is [`DARK_BRIGHT`].
 const DARK_NORMAL: [Color; 8] = [
     Color::hex(0x000000),
     Color::hex(0xf05f5a),
@@ -117,6 +116,37 @@ const DARK_NORMAL: [Color; 8] = [
     Color::hex(0xd574d3),
     Color::hex(0x35cbd2),
     Color::hex(0xe5e5e5),
+];
+
+/// The bright eight that Crook Dark and Midnight print in, and colour tabs
+/// with.
+///
+/// [`DARK_NORMAL`]'s six hues, each a step lighter (seven hundredths of
+/// OKLCH lightness, hue kept, chroma kept where sRGB allows it). The bright
+/// half used to be xterm's, and that was the half a person sees most of: a
+/// tab's colour is drawn from it — a mark rather than text, and the normal half
+/// of a dark palette is too dim for two of its colours to be told apart in a
+/// four-pixel stripe — so the six swatches in a tab's menu were pure #ff0000,
+/// #00ff00 and the rest beside chrome that is everywhere else muted. They
+/// looked like another application's, and xterm's bright blue is 3.56:1 on
+/// Crook Dark's pane, under the 4.5:1 text needs, for every program that
+/// prints in it.
+///
+/// Lighter than the normal half rather than more saturated, which is what
+/// "bright" means on a dark grid: text a program prints in colour 9 rather than
+/// 1 reads as the same colour, louder. Each is at least 6:1 on Crook Dark's
+/// surfaces, well past the 3:1 WCAG asks of a mark and the 4.5:1 it asks of
+/// text. Black and white are xterm's: grey is what a prompt dims a suggestion
+/// with, and white is white.
+const DARK_BRIGHT: [Color; 8] = [
+    Color::hex(0x7f7f7f),
+    Color::hex(0xfe7f78),
+    Color::hex(0x7ddf76),
+    Color::hex(0xf5e05e),
+    Color::hex(0x8cb4fe),
+    Color::hex(0xed8aea),
+    Color::hex(0x54e2e9),
+    Color::hex(0xffffff),
 ];
 
 /// What Crook has always looked like, and what it opens in.
@@ -155,7 +185,7 @@ pub const DARK: Theme = Theme {
         background: Color::hex(0x1a1d24),
         cursor: Color::hex(0x8b5cf6),
         normal: DARK_NORMAL,
-        bright: ANSI_BRIGHT,
+        bright: DARK_BRIGHT,
     },
     is_light: false,
 };
@@ -167,6 +197,15 @@ pub const DARK: Theme = Theme {
 /// from the xterm set, because the standard bright colours are chosen to sit
 /// on black and are unreadable on white — every light terminal theme makes the
 /// same adjustment.
+///
+/// The bright half is the normal half a step *deeper* (four hundredths of
+/// OKLCH lightness, hue kept), which is what "bright" means on paper: the
+/// louder version of a colour on a white page is the darker one. It used to be
+/// a step lighter instead, and its green, yellow and cyan came out between
+/// 3.85:1 and 4.30:1 on the grid — under the 4.5:1 text needs, and the bright
+/// half is text whenever a program asks for colours 9 to 15. Deeper, every one
+/// is past 5.9:1 on the pane and 5.4:1 on the raised surface a tab's menu draws
+/// its swatches on, comfortably past the 3:1 a tab's stripe needs.
 pub const LIGHT: Theme = Theme::derived(
     Color::hex(0x6d3ae8),
     TerminalColors {
@@ -185,12 +224,12 @@ pub const LIGHT: Theme = Theme::derived(
         ],
         bright: [
             Color::hex(0x5c636e),
-            Color::hex(0xd63a37),
-            Color::hex(0x22924a),
-            Color::hex(0xa17800),
-            Color::hex(0x2a66e0),
-            Color::hex(0xb438b4),
-            Color::hex(0x14848e),
+            Color::hex(0xb22123),
+            Color::hex(0x047134),
+            Color::hex(0x7b5b05),
+            Color::hex(0x1347b7),
+            Color::hex(0x8e1e8e),
+            Color::hex(0x03636b),
             Color::hex(0x1f232b),
         ],
     },
@@ -205,6 +244,6 @@ pub const MIDNIGHT: Theme = Theme::derived(
         background: Color::hex(0x000000),
         cursor: Color::hex(0x7c9cff),
         normal: DARK_NORMAL,
-        bright: ANSI_BRIGHT,
+        bright: DARK_BRIGHT,
     },
 );
