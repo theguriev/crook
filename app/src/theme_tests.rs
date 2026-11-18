@@ -167,15 +167,58 @@ fn every_colour_a_program_prints_in_reads_on_crooks_own_themes() {
         "the themes this holds to the bar are not the ones Crook ships"
     );
 
+    // The bright half is text too — `\e[91m` is as common as `\e[31m` — and
+    // colours 9 to 15 are held to the same bar. Bright black is left out with
+    // colour 0: it is the grey a prompt dims a suggestion with, quieter on
+    // purpose.
     for builtin in crooks {
         let terminal = builtin.theme.terminal;
-        for (index, color) in terminal.normal.iter().enumerate().skip(1) {
+        let normal = terminal.normal.iter().enumerate().skip(1);
+        let bright = terminal
+            .bright
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, color)| (index + 8, color));
+        for (index, color) in normal.chain(bright) {
             let ratio = contrast(*color, terminal.background);
             assert!(
                 ratio >= 4.5,
                 "{}: colour {index}, {color:?}, is {ratio:.2}:1 on its grid",
                 builtin.name
             );
+        }
+    }
+}
+
+#[test]
+fn every_tab_colour_reads_as_a_mark_on_crooks_own_themes() {
+    // A tab's colour is a stripe down its row, which sits on `surface`, and a
+    // swatch in its menu, which sits on `surface_raised`. Neither is text, so
+    // the bar is WCAG 1.4.11's 3:1 for a mark rather than 4.5:1 — but it is a
+    // floor on both surfaces, in every theme Crook writes itself. The palettes
+    // in `omarchy` are their authors' and are not held to it.
+    let crooks = BUILTIN.into_iter().filter(|builtin| {
+        !omarchy::OMARCHY
+            .iter()
+            .any(|(name, _)| *name == builtin.name)
+    });
+    for builtin in crooks {
+        let theme = builtin.theme;
+        for color in crate::tab::TabColor::ALL {
+            let mark = theme.terminal.bright[color.index()];
+            for (surface, ground) in [
+                ("surface", theme.surface),
+                ("surface_raised", theme.surface_raised),
+            ] {
+                let ratio = contrast(mark, ground);
+                assert!(
+                    ratio >= 3.,
+                    "{}: a {} tab, {mark:?}, is {ratio:.2}:1 on {surface}",
+                    builtin.name,
+                    color.name()
+                );
+            }
         }
     }
 }
