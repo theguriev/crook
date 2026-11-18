@@ -414,6 +414,16 @@ impl Focus {
         inner.resolve();
     }
 
+    /// Whether the keyboard is on the control whose mouse state is `state`.
+    ///
+    /// For a row that says more while the keyboard is on it, the way it does
+    /// under the pointer: the Keyboard Shortcuts page names a command's action
+    /// then. Asked while the page is being built, so it is the control the
+    /// last frame settled on — the one the ring is around.
+    pub(crate) fn is_on_control(&self, state: &MouseStateHandle) -> bool {
+        self.is_on(StopId::of(state))
+    }
+
     /// Whether the last frame had a control to put the keyboard on.
     pub(crate) fn has_controls(&self) -> bool {
         !self.0.borrow().stops.is_empty()

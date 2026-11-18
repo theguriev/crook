@@ -32602,6 +32602,116 @@ fn the_chords_stand_in_a_column_whatever_word_is_beside_them() {
     );
 }
 
+/// How many rows of the Keyboard Shortcuts page print a split's action name.
+///
+/// The splits and not every window command, because the notes at the foot of
+/// the page spell `crook/window/new-tab` out in an example line, and the
+/// scene holds them though they are scrolled out of sight.
+fn split_names(scene: &Scene) -> usize {
+    frame_text(scene).matches("crook/window/split-").count()
+        + frame_text(scene).matches("crook/window/even-panes").count()
+}
+
+#[test]
+fn a_shortcuts_row_says_where_its_binding_came_from_and_not_its_name() {
+    // Under every label the page printed `crook/window/new-tab · Default`,
+    // the same prefix forty times down a page somebody is reading to find a
+    // key. At rest the line says where the binding came from and nothing
+    // else.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let scene = harness.frame();
+
+    assert!(
+        frame_text(&scene).contains("Default"),
+        "no row says where its binding came from: {}",
+        frame_text(&scene)
+    );
+    assert_eq!(
+        split_names(&scene),
+        0,
+        "a row at rest still prints its action name: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn a_shortcuts_row_names_its_action_under_the_pointer() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let scene = harness.frame();
+    let at = drawn_line(&scene, "Split downwards")
+        .unwrap_or_else(|| panic!("the row is not on screen: {}", frame_text(&scene)));
+
+    harness.move_to(at + vec2f(4., 4.));
+    harness.frame();
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+    assert!(
+        text.contains("crook/window/split-down"),
+        "the hovered row did not name its action: {text}"
+    );
+    assert_eq!(split_names(&scene), 1, "more than the hovered row: {text}");
+}
+
+#[test]
+fn a_shortcuts_row_found_by_its_action_name_prints_it() {
+    // `split-down` is in no title: the row is on the page because of its
+    // name, and says so. `split` is in the title, and finds the row by that.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    harness.frame();
+    harness.type_text("split-down");
+    let text = frame_text(&harness.frame());
+    assert!(text.contains("Split downwards"), "{text}");
+    assert!(
+        text.contains("crook/window/split-down"),
+        "a row found by its name does not print it: {text}"
+    );
+
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    harness.frame();
+    harness.type_text("split");
+    let scene = harness.frame();
+    assert!(frame_text(&scene).contains("Split downwards"));
+    assert_eq!(
+        split_names(&scene),
+        0,
+        "a row found by its title printed its name: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn a_shortcuts_row_names_its_action_while_the_keyboard_is_on_it() {
+    // With a file to write, so the chords are controls the keyboard stops on:
+    // a run with nowhere to write draws them dead, and the keyboard skips a
+    // dead control.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    harness.frame();
+    harness.type_text("split");
+    harness.frame();
+    // Down from the box is the first control, which is the first row's chord.
+    harness.press("down", Modifiers::default(), "");
+    harness.frame();
+    let scene = harness.frame();
+    assert_eq!(
+        split_names(&scene),
+        1,
+        "the row the keyboard is on does not name its action, or another does: {}",
+        frame_text(&scene)
+    );
+}
+
 #[test]
 fn the_page_names_the_file_this_run_read_and_not_the_one_on_disk() {
     // An ephemeral run keeps the shipped table and reads nobody's file, and
@@ -32941,10 +33051,12 @@ fn the_palette_opens_on_the_chord_a_plugin_asked_for() {
         text.contains(PALETTE_PLACEHOLDER),
         "the palette did not come up: {text}"
     );
-    // Every command `crook/window` registered, listed by its title and by the
-    // name a person would bind.
+    // Every command `crook/window` registered, listed by its title — and the
+    // name a person would bind on the row the keyboard is on, which is the
+    // first one, and on no other.
     assert!(text.contains("New agent tab"), "{text}");
-    assert!(text.contains("crook/window/new-tab"), "{text}");
+    assert!(text.contains("crook/tabs/answer-waiting"), "{text}");
+    assert!(!text.contains("crook/window/new-tab"), "{text}");
 }
 
 #[test]
@@ -33408,9 +33520,11 @@ fn the_keys_are_grouped_by_the_plugin_that_registered_the_command() {
         "the groups are not in load order: {window:?} then {tabs:?}"
     );
 
+    // By a title the Tabs plugin registers: a row's action name is printed
+    // on the selected row only, and that is the first row of the window's.
     let under = text_lines(&scene, |_| true)
         .into_iter()
-        .find(|(at, line)| at.y() > tabs.y() && line.contains("crook/tabs/"))
+        .find(|(at, line)| at.y() > tabs.y() && line.starts_with("Close tab"))
         .map(|(at, _)| at);
     assert!(
         under.is_some(),
@@ -34808,6 +34922,58 @@ fn a_command_is_not_answered_twice_over() {
         "{}",
         frame_text(&scene)
     );
+}
+
+#[test]
+fn a_palette_row_names_its_action_only_once_it_is_selected() {
+    // The action name down the side of every row was a second column of
+    // `crook/window/…` beside titles that already said what each one does.
+    // It stays on the row the keyboard is on, which is the one about to be
+    // run, and moves with it. `split` is in every one of these titles, so
+    // none of them is in the list because of its name.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "split");
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("Even out the split"), "{text}");
+    assert!(text.contains("Split downwards"), "{text}");
+    assert!(
+        text.contains("crook/window/even-panes"),
+        "the selected row lost its action name: {text}"
+    );
+    assert!(
+        !text.contains("crook/window/split-down"),
+        "a row that is not selected still prints its action name: {text}"
+    );
+
+    harness.press("down", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("crook/window/split-down"),
+        "the name did not follow the selection: {text}"
+    );
+    assert!(
+        !text.contains("crook/window/even-panes"),
+        "the row left behind kept its name: {text}"
+    );
+}
+
+#[test]
+fn a_palette_row_found_by_its_action_name_prints_it() {
+    // `crook/window/split` is in no title. Every row it finds is there
+    // because of the name, so every one of them says so, selected or not.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "crook/window/split");
+    let text = frame_text(&harness.frame());
+
+    for name in [
+        "crook/window/split-down",
+        "crook/window/split-left",
+        "crook/window/split-right",
+        "crook/window/split-up",
+    ] {
+        assert!(text.contains(name), "{name} is not on its row: {text}");
+    }
 }
 
 #[test]

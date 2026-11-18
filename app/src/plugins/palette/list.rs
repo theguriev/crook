@@ -357,7 +357,7 @@ fn command(
     mode: Mode,
     fonts: Fonts,
 ) -> Box<dyn Element> {
-    let line = line(entry, mode, fonts);
+    let line = line(entry, mode, selected, fonts);
     let action = target.action;
     let subject = target.subject.clone();
 
@@ -403,7 +403,7 @@ fn command(
 /// map a map of commands.
 fn fact(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     ConstrainedBox::new(
-        Container::new(line(entry, mode, fonts))
+        Container::new(line(entry, mode, false, fonts))
             .with_padding(Padding {
                 top: 7.,
                 bottom: 7.,
@@ -416,9 +416,10 @@ fn fact(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     .finish()
 }
 
-/// What is written across a row: what it is called, what reaches it, and the
-/// name to write in a file.
-fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
+/// What is written across a row: what it is called, what reaches it, and —
+/// on the selected row, or one the query found by it — the name to write in a
+/// file.
+fn line(entry: &Entry, mode: Mode, selected: bool, fonts: Fonts) -> Box<dyn Element> {
     let mut line = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -428,7 +429,7 @@ fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     // I write in my keybindings file", and the keys answer "is there a faster
     // way to do this again", which is the question somebody reading a list of
     // things to do is actually asking.
-    let named = trailing(entry);
+    let named = trailing(entry, selected);
     if let Some(cluster) = cluster(entry, mode, fonts) {
         line.add_child(Container::new(cluster).finish());
     }
@@ -457,13 +458,24 @@ fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
 /// settings row is on — and otherwise the action name, which is the only way a
 /// person finds out what to write in their keybindings file.
 ///
+/// The name only on the row that is `selected` and on a row the query found
+/// by it (see [`Entry::id_matched`]). On every row it was a second column of
+/// `crook/window/…` running down beside the titles, which doubled what each
+/// line asked the eye to read for an answer most people never need; the row
+/// the keyboard is on is the one somebody is about to run or rebind, so it is
+/// the one that carries the name. A detail is not the name and stays on every
+/// row: two tabs called `crook` are told apart by it and by nothing else.
+///
 /// Nothing for a key the pane eats, which has no name because no keybindings
 /// file can reach it; and nothing for a binding on a plain action, whose title
 /// *is* its name — the same string twice on one row is not a column, it is a
 /// stutter.
-fn trailing(entry: &Entry) -> Option<&str> {
+fn trailing(entry: &Entry, selected: bool) -> Option<&str> {
     if let Some(detail) = entry.detail.as_deref() {
         return Some(detail);
+    }
+    if !selected && !entry.id_matched {
+        return None;
     }
     entry
         .action

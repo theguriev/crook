@@ -56,6 +56,7 @@ fn slug(title: &str) -> String {
 fn entry(title: &str) -> Entry {
     Entry {
         action: ActionName::parse(&format!("crook/test/{}", slug(title))).ok(),
+        id_matched: false,
         title: title.to_owned(),
         detail: None,
         chords: Vec::new(),
@@ -610,4 +611,19 @@ fn every_word_of_a_query_is_matched_against_the_title_case_folded() {
         !command_matches(title, &action, &owner, none, &["split", "missing"]),
         "a word the row carries nowhere drops it, even beside one it does"
     );
+}
+
+#[test]
+fn a_command_is_found_by_its_name_only_by_a_term_its_title_lacks() {
+    // `split` is in the title as well as the name, so the title is what found
+    // the row and the name is not news; `split-left` and `crook/win` are in
+    // the name alone.
+    let action = name("crook/window/split-left");
+    let title = "Split to the left";
+
+    assert!(!found_by_name(title, &action, &["split"]));
+    assert!(!found_by_name(title, &action, &["left", "split"]));
+    assert!(found_by_name(title, &action, &["split-left"]));
+    assert!(found_by_name(title, &action, &["crook/win"]));
+    assert!(found_by_name(title, &action, &["left", "window"]));
 }
