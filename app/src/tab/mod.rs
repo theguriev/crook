@@ -35,6 +35,8 @@ use crate::forge::{CheckError, Found};
 use crate::git::BranchAtWork;
 use crate::settings::Granularity;
 
+pub(crate) mod emoji;
+mod emoji_data;
 mod group;
 mod pane;
 mod remote;
