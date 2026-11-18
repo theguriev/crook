@@ -2199,7 +2199,7 @@ fn washed(ground: Color, wash: Color) -> Color {
 
 /// The caption's type: the chrome's caption size, the size of a tab row's
 /// chips and a setting's description.
-const CAPTION_TEXT: f32 = 11.;
+const CAPTION_TEXT: f32 = crate::style::text::CAPTION;
 /// How large a caption's type is under rows `row` px tall.
 ///
 /// [`CAPTION_TEXT`] at the default size and anything larger. The caption
