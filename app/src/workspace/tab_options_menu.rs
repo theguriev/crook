@@ -51,6 +51,7 @@ use crate::settings::{Density, Granularity, PrimaryInfo, resolve_subtitle, subti
 use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
+use super::tooltip::{Named, TipKey};
 use super::view::Workspace;
 use super::window_room::WindowRoom;
 
@@ -159,12 +160,14 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             options.density == Density::Compact,
             menu.compact.clone(),
             OptionsAction::SetDensity(Density::Compact),
+            workspace.named(COMPACT_TIP, "Compact", None),
         ),
         icon_segment(
             density_icon(Lucide::LayoutGrid),
             options.density == Density::Expanded,
             menu.expanded.clone(),
             OptionsAction::SetDensity(Density::Expanded),
+            workspace.named(EXPANDED_TIP, "Expanded", None),
         ),
     ));
 
@@ -466,13 +469,17 @@ fn text_segment(
 /// accident: Warp passes one `icon_color` into `render_popup_segment` and never
 /// branches on selection, and the two adjacent controls having deliberately
 /// different rules is visible in the design.
+///
+/// The "View as" segments say what they are in words; these are a picture of
+/// three rules and one of four squares, so each names itself in a card.
 fn icon_segment(
     glyph: Box<dyn Element>,
     is_selected: bool,
     state: MouseStateHandle,
     action: OptionsAction,
+    named: Named,
 ) -> Box<dyn Element> {
-    Hoverable::new(state, move |mouse| {
+    let segment = Hoverable::new(state, move |mouse| {
         segment_pill(
             ConstrainedBox::new(glyph)
                 .with_width(ICON_SIZE)
@@ -483,8 +490,15 @@ fn icon_segment(
         )
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Options(action)))
-    .finish()
+    .finish();
+    named.wrap(segment).finish()
 }
+
+/// What names the Compact segment, and what `--tooltip` calls it.
+const COMPACT_TIP: TipKey = TipKey::new("density-compact");
+
+/// The Expanded segment's.
+const EXPANDED_TIP: TipKey = TipKey::new("density-expanded");
 
 /// The Compact mark, and the Expanded one.
 ///

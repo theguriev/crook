@@ -274,6 +274,11 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Keep the name card of every control called this up, as though the
+    /// pointer had rested on it: the fifth state no unattended run can hold
+    /// still. The control has to be drawn for its card to be — a block's
+    /// squares want `--hover-block`, the density segments `--menu`.
+    tooltip: Option<String>,
     /// Run these named actions before the picture is taken, in order — or,
     /// in a window, once the shells are up and any `--run` has answered.
     ///
@@ -1463,6 +1468,12 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 overrides.section = Some(name);
             }
             "--hover" => overrides.hover = true,
+            "--tooltip" => {
+                overrides.tooltip = Some(
+                    args.next()
+                        .context("`--tooltip` needs the name of a control")?,
+                );
+            }
             "--with-plugins" => overrides.with_plugins = true,
             "--action" => {
                 let name = args.next().context("`--action` needs a command name")?;
@@ -1985,6 +1996,14 @@ OPTIONS:
                        be written to closes the creator, one that cannot leaves
                        it up saying why
     --hover            Start with the first row's detail card up
+    --tooltip <NAME>   Start with the name card up on every control called NAME:
+                       new-tab, close-pane, close-tab, close-group,
+                       block-copy, block-menu (with --hover-block), find-case,
+                       find-regex, find-filter, find-previous, find-next,
+                       find-close (with --find-output), new-theme,
+                       close-themes (with --themes), close-changes (with
+                       --changes), density-compact, density-expanded (with
+                       --menu)
     --action <name [argument]>
                        Run this named action before the picture is taken, so a
                        plugin's own panel can be looked at. Anything after the
@@ -2434,6 +2453,9 @@ fn apply_overrides(
     }
     if overrides.hover {
         workspace.hover_first_row(ctx);
+    }
+    if let Some(control) = overrides.tooltip.clone() {
+        workspace.pin_tooltip(control, ctx);
     }
     if let Some(fixture) = &overrides.ask_fixture {
         fixture.seed(workspace, ctx);
@@ -5567,6 +5589,20 @@ mod tests {
                 }
             }
         );
+        assert_eq!(
+            parse(&["--tooltip", "find-case"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    tooltip: Some("find-case".to_owned()),
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert!(
+            parse(&["--tooltip"]).is_err(),
+            "`--tooltip` needs the control"
+        );
         // `--settings` takes an optional page, so it has to be right about
         // both halves: a page it recognises is consumed, and the next flag is
         // left for the loop rather than eaten as a page name.
@@ -5752,6 +5788,7 @@ mod tests {
             "--select-output",
             "--menu",
             "--hover",
+            "--tooltip",
             "--section",
             "--find",
             "--find-output",

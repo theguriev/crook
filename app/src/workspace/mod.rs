@@ -56,6 +56,7 @@ mod text_field;
 mod theme_panel;
 pub(crate) mod theme_preview;
 mod title_bar;
+mod tooltip;
 mod view;
 pub(crate) mod window_room;
 

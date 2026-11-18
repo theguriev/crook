@@ -28,6 +28,7 @@ use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::tab_options_menu;
+use super::tooltip::TipKey;
 use super::view::Workspace;
 
 /// The `+` itself. Lucide's own 24-unit box scaled to sixteen, which is the
@@ -63,6 +64,9 @@ pub(super) const NEW_TAB_HEIGHT: f32 = 40.;
 /// list rather than one more entry in it, and taking the rows' corner was the
 /// one thing that would have made it read as an empty tab.
 const PLUS_RADIUS: f32 = crate::style::radius::MEDIUM;
+
+/// What names the `+`, and what `--tooltip` calls it.
+pub(super) const NEW_TAB_TIP: TipKey = TipKey::new("new-tab");
 
 /// The band under the last row, and the `+` centred in it.
 ///
@@ -109,6 +113,15 @@ pub(super) fn new_tab_area(workspace: &Workspace) -> Box<dyn Element> {
         ctx.dispatch_typed_action(WorkspaceAction::Options(OptionsAction::TogglePopup));
     })
     .finish();
+    // The band is wider than the mark on it, and the card is centred on the
+    // band, which puts it under the `+` all the same. Hung from the lit ground
+    // rather than from the box that answers the press, which is the inset
+    // deeper.
+    let band = workspace
+        .named(NEW_TAB_TIP, "New tab", Some("crook/window/new-tab"))
+        .wrap(band)
+        .with_clearance(-PLUS_INSET)
+        .finish();
 
     ConstrainedBox::new(band)
         .with_height(NEW_TAB_HEIGHT)

@@ -124,6 +124,7 @@ use review::{Anchor, Key};
 use super::settings_page::focus::{self as keyboard, Key as Walk, Stop};
 
 use super::action::{ChangesAction, WorkspaceAction};
+use super::tooltip::TipKey;
 use super::view::Workspace;
 
 /// The column's width.
@@ -2564,11 +2565,21 @@ fn text_button(
     }
 }
 
-/// The × in the corner.
-fn close_button(workspace: &Workspace) -> Box<dyn Element> {
-    let state = workspace.changes_panel().control(Control::Close);
+/// What names the column's ×, and what `--tooltip` calls it.
+const CLOSE_TIP: TipKey = TipKey::new("close-changes");
 
-    Hoverable::new(state, move |mouse| {
+/// The × in the corner, and the card that names it.
+///
+/// The chord is the toggle's, which is what closes an open column. The card is
+/// up while the keyboard's ring is on the ×, too: this is the one icon-only
+/// control the keyboard can stand on, and a ring around a cross says no more
+/// to somebody tabbing through than the cross did.
+fn close_button(workspace: &Workspace) -> Box<dyn Element> {
+    let panel = workspace.changes_panel();
+    let state = panel.control(Control::Close);
+    let focused = panel.is_lit(Control::Close);
+
+    let button = Hoverable::new(state, move |mouse| {
         let (background, color) = if mouse.is_hovered() {
             (theme().overlay_2, theme().text_primary)
         } else {
@@ -2592,5 +2603,10 @@ fn close_button(workspace: &Workspace) -> Box<dyn Element> {
     .on_click(|_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Changes(ChangesAction::Close));
     })
-    .finish()
+    .finish();
+    workspace
+        .named(CLOSE_TIP, "Close", Some("crook/changes/toggle"))
+        .wrap(button)
+        .with_focus(focused)
+        .finish()
 }
