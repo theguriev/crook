@@ -961,6 +961,13 @@ pub enum SettingsAction {
     /// where the answer is kept, and a chord sends it as well as the page —
     /// the same arrangement [`Self::SetFontSize`] has with the zoom chords.
     ToggleTabsPanel,
+    /// Puts the tabs away again after they were brought up over the work of
+    /// a window too narrow to dock them: Escape, or a press beside them.
+    ///
+    /// Beside [`Self::ToggleTabsPanel`] because it is the other half of the
+    /// same press, though it changes no setting — see
+    /// [`Workspace::tabs_panel_folds`](super::view::Workspace::tabs_panel_folds).
+    CloseTabsDrawer,
     /// "Ask before ending working agents": whether a close that would end
     /// something still working asks first.
     ToggleAskBeforeEnding,

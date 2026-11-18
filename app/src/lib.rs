@@ -2776,6 +2776,16 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             ctx,
         )
     });
+    let size = overrides.size.map_or(WINDOW_SIZE, |[width, height]| {
+        vec2f(width as f32, height as f32)
+    });
+    // Written down before anything is asked of the workspace, as a window's
+    // delegate writes it before its first frame: what the columns do depends
+    // on the width — a narrow one folds the tabs — and an action like
+    // `crook/window/toggle-panel` has to find the window it will be drawn in.
+    workspace
+        .read(&app, |workspace, _| workspace.window_size_cell())
+        .set(size);
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
             // A run with a shell to show wants one pane filling the body, not
@@ -2795,9 +2805,6 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     // The presenter is a parameter rather than something the frame closure
     // holds, because typing needs it too: a keystroke is dispatched through the
     // element tree the last frame built.
-    let size = overrides.size.map_or(WINDOW_SIZE, |[width, height]| {
-        vec2f(width as f32, height as f32)
-    });
     let mut presenter = Presenter::new(window_id, text_layout);
     let frame = |app: &mut App, presenter: &mut Presenter| {
         app.update(|ctx| {
@@ -4775,7 +4782,21 @@ impl WindowDelegate for Shell {
         // session file is not saved from here: `placed` tells it the window's
         // size when that changes, which is not the frame's while the window
         // is maximised.
-        self.window_size.set(size);
+        let before = self.window_size.replace(size);
+        // Except for a width the workspace lays its columns out by: a window
+        // narrowed past the point where they fold, or widened back, needs the
+        // tree rebuilt for the new arrangement, and nothing else would ask.
+        // Its own update before the one that builds the frame, for the
+        // reason `sync_window_state` gives; the workspace notifies only on
+        // the crossing, so the rest of a drag rebuilds nothing.
+        if before.x() != size.x() {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.window_width_changed(before.x(), ctx)
+                })
+            });
+        }
         self.sync_window_state();
 
         let window_id = self.window_id;

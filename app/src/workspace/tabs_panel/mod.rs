@@ -119,6 +119,33 @@ pub(super) fn panel_width(width: f32) -> f32 {
     }
 }
 
+/// The least width the work beside the docked columns is left before the
+/// columns stop docking and fold away: twice the panel's default width.
+///
+/// Measured from what the columns are for. The work is panes side by side,
+/// and two panes each as wide as the default panel — about thirty columns of
+/// monospace apiece, enough for a title and a short prompt — is the least
+/// that still reads as a split rather than as two slivers. At the default
+/// width that puts the fold at 744 logical pixels: a 640-wide window folds,
+/// where it used to give the tabs 39% of itself and each of its two panes
+/// under 200 pixels, and the default 1024 never does. Nor does 1024 at any
+/// width the edge can be dragged to, since the widest ([`MAX_PANEL_WIDTH`])
+/// plus this is still short of it.
+///
+/// A width rather than a fraction of the window because what runs out is
+/// room for text, which is counted in pixels whatever the window is.
+pub(super) const LEAST_WORK_WIDTH: f32 = 2. * PANEL_WIDTH;
+
+/// Whether a window `window_width` wide is too narrow to dock a tabs panel
+/// `panel_width` wide beside its work. See [`LEAST_WORK_WIDTH`].
+///
+/// A window that has not been laid out yet — a test, the first moment of a
+/// headless picture — measures nothing, and nothing is too narrow: the
+/// columns dock as they always did until there is a width to say otherwise.
+pub(super) fn window_is_narrow(window_width: f32, panel_width: f32) -> bool {
+    window_width >= 1. && window_width - panel_width < LEAST_WORK_WIDTH
+}
+
 /// How much of the top of the panel the window's own controls have taken.
 ///
 /// See [`title_strip`]. The number is the control bar's own: it is the room

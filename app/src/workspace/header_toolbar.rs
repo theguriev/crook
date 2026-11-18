@@ -41,6 +41,7 @@ use crookui_core::prelude::*;
 
 use crate::theme::theme;
 
+use super::action::{SettingsAction, WorkspaceAction};
 use super::title_bar;
 use super::view::Workspace;
 
@@ -60,6 +61,70 @@ const PADDING: Padding = Padding {
     right: 10.,
 };
 
+/// The side of the square button that brings folded tabs up: about the
+/// height of the chip `crook/tabs` pins beside it — eleven-point text and
+/// three pixels above and below — so the two sit on one line and the row is
+/// no taller for having both.
+const FOLDED_TABS_BUTTON_SIZE: f32 = 20.;
+
+/// The icon on it: the chip's bell is thirteen, and a menu's three bars read
+/// a size up from a bell's outline.
+const FOLDED_TABS_ICON_SIZE: f32 = 14.;
+
+/// Its corners, the chip's.
+const FOLDED_TABS_BUTTON_RADIUS: f32 = 5.;
+
+/// The gap between it and whatever is pinned to the left of the row.
+const FOLDED_TABS_BUTTON_GAP: f32 = 6.;
+
+/// The way to the tabs while a narrow window has folded them away, at the
+/// left end of the row where the panel would have been: nothing at all at
+/// any other time.
+///
+/// The toggle chord does the same, but a chord is something a person has to
+/// know, and the panel it brings up is also where Sessions, Settings,
+/// Plugins and Store live — without this the only way back to a page of
+/// settings in a narrow window would be a key nobody is shown. Drawn while
+/// the tabs float as well, under them, so the row does not move when they
+/// go.
+fn folded_tabs_button(workspace: &Workspace) -> Box<dyn Element> {
+    if !workspace.tabs_panel_folds() {
+        return Empty::new().finish();
+    }
+    let button = Hoverable::new(workspace.tabs_drawer_button(), |mouse| {
+        let (background, color) = if mouse.is_hovered() {
+            (theme().overlay_2, theme().text_primary)
+        } else {
+            (Color::TRANSPARENT, theme().text_muted)
+        };
+        Container::new(
+            ConstrainedBox::new(
+                Align::new(
+                    Icon::new(Lucide::Menu, FOLDED_TABS_ICON_SIZE)
+                        .with_color(color)
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_width(FOLDED_TABS_BUTTON_SIZE)
+            .with_height(FOLDED_TABS_BUTTON_SIZE)
+            .finish(),
+        )
+        .with_background_color(background)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            FOLDED_TABS_BUTTON_RADIUS,
+        )))
+        .finish()
+    })
+    .on_click(|_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::from(SettingsAction::ToggleTabsPanel))
+    })
+    .finish();
+    Container::new(button)
+        .with_margin_right(FOLDED_TABS_BUTTON_GAP)
+        .finish()
+}
+
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     // Crook's window is the application's to decorate, so this row is the
     // title bar and the traffic lights are painted over it on macOS. Which
@@ -75,6 +140,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             // title-bar search bar would go; Crook has no search bar, so what
             // stands there is whatever was pinned to the left, and the rest of
             // the row is the gap to the right-hand item.
+            .with_child(folded_tabs_button(workspace))
             .with_child(
                 workspace
                     .host()

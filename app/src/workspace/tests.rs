@@ -29642,6 +29642,245 @@ mod hiding_the_panel {
     }
 }
 
+/// Folding the tabs panel away in a window too narrow to dock it.
+///
+/// What these pin is that the fold is the window's and not the person's: the
+/// setting is never written by it, the toggle while narrow brings the tabs up
+/// over the work rather than flipping the setting, and the window widened
+/// again docks whatever the setting said all along. The resize is the one the
+/// window's delegate makes — the width written into the cell and the
+/// workspace told of the change — because a harness frame is only ever drawn
+/// at a size and never remembers it.
+mod folding_the_panel {
+    use super::*;
+
+    /// A window too narrow for the column: the one the task was found in.
+    const NARROW: Vector2F = vec2f(640., 480.);
+
+    /// Makes the window `window` big, the way the delegate does on a frame
+    /// of that size, and draws the frame.
+    fn resize(harness: &mut Harness, window: Vector2F) -> Rc<Scene> {
+        let cell = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.window_size_cell());
+        let before = cell.replace(window);
+        if before.x() != window.x() {
+            harness
+                .workspace_update(|workspace, ctx| workspace.window_width_changed(before.x(), ctx));
+        }
+        harness.frame_sized(window)
+    }
+
+    /// Whether the frame drew the tabs' column, docked or floating: a panel
+    /// as wide as the panel, flush with the window's left edge.
+    fn tabs_column(scene: &Scene) -> bool {
+        visible_rects(scene).any(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().surface)
+                && (bounds.width() - tabs_panel::PANEL_WIDTH).abs() < 0.5
+                && bounds.min_x() < 1.
+        })
+    }
+
+    fn floats(harness: &Harness) -> bool {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tabs_panel_floats())
+    }
+
+    fn showing(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs_panel_is_showing()
+        })
+    }
+
+    #[test]
+    fn a_narrow_window_folds_the_tabs_and_gives_the_work_the_room() {
+        let mut harness = Harness::panel(2);
+        let scene = resize(&mut harness, NARROW);
+
+        assert!(!showing(&harness));
+        assert!(!tabs_column(&scene), "the column is still drawn");
+        assert!(
+            header_box(&scene).min_x() < 1.,
+            "the work did not take the column's width: {:?}",
+            header_box(&scene)
+        );
+        assert!(
+            harness.general().show_tabs_panel,
+            "folding the panel changed the setting"
+        );
+    }
+
+    #[test]
+    fn the_fold_is_where_the_work_would_get_less_than_two_panels() {
+        let mut harness = Harness::panel(1);
+        let line = tabs_panel::PANEL_WIDTH + tabs_panel::LEAST_WORK_WIDTH;
+
+        assert!(tabs_column(&resize(&mut harness, vec2f(line, 480.))));
+        assert!(!tabs_column(&resize(&mut harness, vec2f(line - 1., 480.))));
+    }
+
+    #[test]
+    fn the_window_crook_opens_at_never_folds_whatever_width_the_edge_was_dragged_to() {
+        let mut settings = Settings::ephemeral();
+        let mut general = settings.general();
+        general.tabs_panel_width = f32::MAX;
+        settings.set_general(general);
+        let mut harness = Harness::with_settings(1, settings);
+        resize(&mut harness, WINDOW);
+        assert!(showing(&harness), "the default window folded a wide panel");
+        // And a wide panel folds sooner than the default one does: the line
+        // is the room the work is left, not the window alone.
+        let line = tabs_panel::PANEL_WIDTH + tabs_panel::LEAST_WORK_WIDTH;
+        resize(&mut harness, vec2f(line, 480.));
+        assert!(
+            !showing(&harness),
+            "a wide panel docked where it leaves too little"
+        );
+    }
+
+    #[test]
+    fn the_toggle_in_a_narrow_window_floats_the_tabs_without_touching_the_setting() {
+        let mut harness = Harness::panel(2);
+        resize(&mut harness, NARROW);
+
+        harness.run_command("crook/window/toggle-panel");
+        let scene = harness.frame_sized(NARROW);
+        assert!(floats(&harness));
+        assert!(tabs_column(&scene), "the toggle did not bring the tabs up");
+        assert!(
+            header_box(&scene).min_x() < 1.,
+            "the tabs docked and pushed the work over instead of floating"
+        );
+        assert!(harness.general().show_tabs_panel);
+
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!floats(&harness));
+        assert!(!tabs_column(&harness.frame_sized(NARROW)));
+        assert!(
+            harness.general().show_tabs_panel,
+            "putting them away again hid the panel for the wide window too"
+        );
+    }
+
+    #[test]
+    fn a_hidden_panel_stays_hidden_through_a_toggle_in_a_narrow_window() {
+        let mut harness = Harness::panel(2);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!harness.general().show_tabs_panel);
+        resize(&mut harness, NARROW);
+
+        harness.run_command("crook/window/toggle-panel");
+        assert!(floats(&harness), "the toggle did not bring the tabs up");
+        assert!(
+            !harness.general().show_tabs_panel,
+            "the toggle while narrow wrote the setting"
+        );
+
+        let scene = resize(&mut harness, WINDOW);
+        assert!(
+            !tabs_column(&scene),
+            "the wide window docked a panel the person had hidden"
+        );
+    }
+
+    #[test]
+    fn escape_a_press_beside_them_or_a_choice_puts_floating_tabs_away() {
+        let mut harness = Harness::panel(2);
+        resize(&mut harness, NARROW);
+        let open = |harness: &mut Harness| {
+            harness.run_command("crook/window/toggle-panel");
+            harness.frame_sized(NARROW);
+            assert!(floats(harness));
+        };
+
+        open(&mut harness);
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert!(!floats(&harness), "Escape left the tabs up");
+
+        open(&mut harness);
+        harness.click(vec2f(500., 300.), MouseButton::Left);
+        assert!(!floats(&harness), "a press beside the tabs left them up");
+
+        open(&mut harness);
+        let other = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().next().expect("a tab").id()
+        });
+        harness.dispatch_action(TabAction::Select(other));
+        assert!(!floats(&harness), "choosing a tab left the tabs up");
+
+        assert!(harness.general().show_tabs_panel);
+    }
+
+    #[test]
+    fn the_search_chord_in_a_narrow_window_floats_the_tabs_with_the_box() {
+        let mut harness = Harness::panel(2);
+        harness.run_command("crook/window/toggle-panel");
+        resize(&mut harness, NARROW);
+
+        harness.press_search_chord();
+
+        assert!(floats(&harness));
+        assert!(harness.panel_search_takes_keys());
+        assert!(
+            !harness.general().show_tabs_panel,
+            "the search chord wrote the setting from a narrow window"
+        );
+        // The first Escape leaves the box and the second the panel.
+        harness.press_key("escape", Modifiers::default());
+        assert!(floats(&harness));
+        harness.press_key("escape", Modifiers::default());
+        assert!(!floats(&harness));
+    }
+
+    #[test]
+    fn the_header_has_a_button_to_the_folded_tabs() {
+        let mut harness = Harness::panel(2);
+        let header = header_box(&resize(&mut harness, NARROW));
+
+        // In the header's own padding from its top-left corner, where the
+        // button is the first thing in the row.
+        harness.click(header.origin() + vec2f(18., 16.), MouseButton::Left);
+
+        assert!(floats(&harness), "the button did not bring the tabs up");
+    }
+
+    #[test]
+    fn widening_the_window_docks_the_tabs_again_and_forgets_they_floated() {
+        let mut harness = Harness::panel(2);
+        resize(&mut harness, NARROW);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(floats(&harness));
+
+        let scene = resize(&mut harness, WINDOW);
+        assert!(tabs_column(&scene), "the wide window has no column");
+        assert_eq!(header_box(&scene).min_x(), tabs_panel::PANEL_WIDTH);
+
+        let scene = resize(&mut harness, NARROW);
+        assert!(!floats(&harness), "narrowing again found the tabs floating");
+        assert!(!tabs_column(&scene));
+    }
+
+    #[test]
+    fn the_themes_panel_floats_over_a_narrow_window_instead_of_docking() {
+        let mut harness = Harness::panel(1);
+        harness.open_theme_panel();
+
+        let wide = resize(&mut harness, WINDOW);
+        assert!(
+            header_box(&wide).min_x() > tabs_panel::PANEL_WIDTH,
+            "the Themes panel is not docked in a wide window"
+        );
+
+        let narrow = resize(&mut harness, NARROW);
+        assert!(
+            header_box(&narrow).min_x() < 1.,
+            "the Themes panel took the narrow window's work: {:?}",
+            header_box(&narrow)
+        );
+    }
+}
+
 /// The bell: what a shell asks for that only the tab strip can answer.
 ///
 /// Driven through `apply_terminal_update`, which is the exact call the
