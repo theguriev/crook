@@ -274,16 +274,26 @@ fn button(
 
     Hoverable::new(state, move |mouse| {
         let (background, border) = match (primary, mouse.is_hovered()) {
-            (true, false) => (theme().accent, theme().accent),
-            (true, true) => (theme().accent, theme().text_primary),
+            (true, false) => (theme().accent_fill(), theme().accent_fill()),
+            (true, true) => (theme().accent_fill(), theme().text_primary),
             (false, false) => (Color::TRANSPARENT, theme().border),
             (false, true) => (theme().overlay_2, theme().border),
+        };
+        // The draft's accent can be any colour the candidates offer, and its
+        // text was not chosen to read on it: a lime accent under Crook
+        // Dark's light text was a "Create" at 1.5:1. So the label takes the
+        // ink that does read, on the fill that lets it. See
+        // `Theme::accent_fill`.
+        let ink = if primary {
+            theme().on_accent_text()
+        } else {
+            theme().text_primary
         };
 
         Container::new(
             Align::new(
                 Text::new(label, ui, crate::style::text::CAPTION)
-                    .with_color(theme().text_primary)
+                    .with_color(ink)
                     .finish(),
             )
             .finish(),

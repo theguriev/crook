@@ -399,3 +399,61 @@ fn a_failed_block_says_how_it_ended_in_its_stripe_s_red_where_that_reads() {
         washed_out.text_primary
     );
 }
+
+#[test]
+fn a_label_on_the_accent_fill_reads_in_every_builtin_palette() {
+    // A filled button's label, at the 4.5:1 WCAG asks of text this size, in
+    // every palette that ships — Crook's own and the bundled ones alike,
+    // since a person picks a bundled palette and gets these buttons too.
+    for available in builtins() {
+        let theme = available.theme;
+        let fill = theme.accent_fill();
+        let ratio = contrast(theme.on_accent_text(), fill);
+        assert!(
+            ratio >= TEXT_CONTRAST,
+            "{}: a label is {ratio:.2}:1 on the accent fill {fill:?}",
+            available.name
+        );
+        // Where the accent already carries a label, the fill is the accent:
+        // the shade is a correction and nothing a palette that reads gets.
+        if contrast(theme.ink_on(theme.accent), theme.accent) >= TEXT_CONTRAST {
+            assert_eq!(fill, theme.accent, "{}", available.name);
+        }
+        // And a correction it stays: a shade of the accent, not a new
+        // colour. The furthest any palette that ships goes is Rosé Pine's,
+        // a fifth of the way to black.
+        assert!(
+            distance(fill, theme.accent) <= 32,
+            "{}: the fill {fill:?} has wandered from the accent {:?}",
+            available.name,
+            theme.accent
+        );
+    }
+
+    // The palette the shade is for: Crook Dark's mid-tone purple is under
+    // 4.5:1 with its light text and its dark ground alike.
+    assert!(contrast(DARK.ink_on(DARK.accent), DARK.accent) < TEXT_CONTRAST);
+    assert_ne!(DARK.accent_fill(), DARK.accent);
+}
+
+#[test]
+fn a_fill_nothing_reads_on_is_moved_until_something_does() {
+    // A palette somebody else wrote, with an accent at the worst place there
+    // is: a middle grey-purple that neither its light text nor its dark ground
+    // reaches 4.5:1 on.
+    let theme = Theme::derived(
+        Color::hex(0x8a6fb0),
+        TerminalColors {
+            background: Color::hex(0x2a2a2a),
+            foreground: Color::hex(0xd0d0d0),
+            ..builtin::DARK.terminal
+        },
+    );
+    assert!(contrast(theme.ink_on(theme.accent), theme.accent) < TEXT_CONTRAST);
+
+    let fill = theme.accent_fill();
+    assert!(contrast(theme.on_accent_text(), fill) >= TEXT_CONTRAST);
+    // The accent itself, which rings and carets and selections are drawn
+    // in, is the colour the palette named.
+    assert_eq!(theme.accent, Color::hex(0x8a6fb0));
+}

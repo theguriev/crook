@@ -206,6 +206,64 @@ impl Theme {
         }
     }
 
+    /// Text to set on `fill`: whichever of the palette's own text, surface
+    /// and ground reads best there.
+    ///
+    /// The palette's own colours rather than a pure white and black, so that
+    /// a label on a filled button is the same ink as the rest of the
+    /// interface — the light of a dark theme, the paper of a light one — and
+    /// never a third colour nobody chose. All three are candidates because no
+    /// one of them is right on every fill: a dark palette's text is light,
+    /// and on its mid-tone accent its ground reads better; a light palette's
+    /// text is near black, and on its saturated accent its paper does.
+    ///
+    /// The text counterpart of [`Self::on_accent_mark`], which answers the
+    /// same question for a mark at 3:1 and keeps `text_primary` wherever that
+    /// passes. A label is held to 4.5:1 and so simply takes the best of the
+    /// three, and on the accent it is drawn on [`Self::accent_fill`], which
+    /// is what guarantees the best is good enough.
+    pub fn ink_on(&self, fill: Color) -> Color {
+        [self.text_primary, self.surface, self.ground]
+            .into_iter()
+            .max_by(|left, right| {
+                creator::contrast(*left, fill).total_cmp(&creator::contrast(*right, fill))
+            })
+            .unwrap_or(self.text_primary)
+    }
+
+    /// The fill of a button, or anything else with words on it, coloured in
+    /// the accent.
+    ///
+    /// The accent itself wherever [`Self::ink_on`] finds a label that reads
+    /// on it at [`TEXT_CONTRAST`]. Where nothing does — a mid-tone purple is
+    /// under 4.5:1 with white and with black alike, and that is exactly the
+    /// tone a brand colour tends to be — the accent is taken towards black or
+    /// towards white, a percent at a time and whichever gets there first,
+    /// until a label does read on it. Mixing with black or white moves the
+    /// colour along its own lightness and leaves its hue where it was, so the
+    /// button is still the accent to the eye, a shade deeper.
+    ///
+    /// Only for fills that carry text. The accent as a focus ring, a caret, a
+    /// selection or a link is a mark beside the text rather than a ground
+    /// under it, and stays the colour the palette named.
+    pub fn accent_fill(&self) -> Color {
+        let reads = |fill: Color| creator::contrast(self.ink_on(fill), fill) >= TEXT_CONTRAST;
+        if reads(self.accent) {
+            return self.accent;
+        }
+        (1..=100)
+            .flat_map(|percent| {
+                [Color::BLACK, Color::WHITE].map(|toward| composite(self.accent, toward, percent))
+            })
+            .find(|fill| reads(*fill))
+            .unwrap_or(self.accent)
+    }
+
+    /// The label on [`Self::accent_fill`]: the ink that reads best there.
+    pub fn on_accent_text(&self) -> Color {
+        self.ink_on(self.accent_fill())
+    }
+
     /// Fills in every role a theme file does not carry.
     ///
     /// Warp's theme files name a handful of colours — an accent, a background,
@@ -274,6 +332,13 @@ impl Theme {
         }
     }
 }
+
+/// The contrast a label has to reach on the fill it is drawn on.
+///
+/// WCAG's AA for body text, 1.4.3. The labels on Crook's buttons are eleven
+/// and twelve pixels, well under the eighteen at which the large-text 3:1
+/// would apply instead.
+pub const TEXT_CONTRAST: f32 = 4.5;
 
 /// How far muted text is mixed towards the text it is quieter than.
 const fn muted_mix(foreground: Color) -> u8 {

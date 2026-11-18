@@ -596,17 +596,30 @@ fn too_deep() -> Box<dyn Element> {
 }
 
 /// A pill, the shape the usage chip is drawn in.
+///
+/// Its words are set in whatever of the palette's inks reads best on the
+/// tone, not in the ground every time: a light palette's ground is light,
+/// and on its amber or its accent that was a pale label on a pale pill —
+/// Rosé Pine's accent pill at 2.6:1. An accent pill is also filled in
+/// [`accent_fill`](crate::theme::Theme::accent_fill), the accent a shade
+/// deeper or lighter where no label would otherwise reach 4.5:1 on it. The
+/// other tones keep their colour, because they are the palette's own word
+/// for "warning" and "danger"; the best ink is what can be done for them.
 fn badge(text: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
+    let fill = match tone {
+        Tone::Accent => theme().accent_fill(),
+        _ => colour(tone),
+    };
     Container::new(
         Text::new(text.to_owned(), ui, SMALL)
-            .with_color(theme().ground)
+            .with_color(theme().ink_on(fill))
             .with_style(Properties {
                 weight: Weight::Semibold,
                 ..Properties::default()
             })
             .finish(),
     )
-    .with_background_color(colour(tone))
+    .with_background_color(fill)
     .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
     .with_padding(Padding {
         top: 3.,

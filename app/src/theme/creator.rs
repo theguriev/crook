@@ -459,7 +459,7 @@ fn carried(color: Color, background: Color, lighten: bool, past: Option<f32>) ->
 }
 
 /// The WCAG 2.0 contrast ratio between two colours, 1 to 21.
-pub(super) fn contrast(left: Color, right: Color) -> f32 {
+pub(crate) fn contrast(left: Color, right: Color) -> f32 {
     let (lighter, darker) = {
         let (left, right) = (relative_luminance(left), relative_luminance(right));
         if left > right {
