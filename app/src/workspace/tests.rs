@@ -29834,15 +29834,37 @@ mod folding_the_panel {
     }
 
     #[test]
-    fn the_header_has_a_button_to_the_folded_tabs() {
-        let mut harness = Harness::panel(2);
-        let header = header_box(&resize(&mut harness, NARROW));
+    fn the_header_has_a_button_to_the_folded_tabs_after_the_window_controls() {
+        // Found by its icon rather than by a place in the header: where it
+        // sits depends on the platform's controls, and on macOS the traffic
+        // lights take the header's left end once the panel is gone. Every
+        // layout, because a button under the lights would be one nobody can
+        // press on the platform that has them.
+        for layout in [
+            ControlLayout::MacOs,
+            ControlLayout::Windows,
+            ControlLayout::Freedesktop,
+        ] {
+            let mut harness = Harness::panel(2);
+            harness.override_controls(layout);
+            let scene = resize(&mut harness, NARROW);
+            let header = header_box(&scene);
+            let buttons = icons_in(&scene, header, Lucide::Menu);
+            assert_eq!(buttons.len(), 1, "{layout:?}: the header has no button");
+            let insets = harness.window_insets();
+            assert!(
+                buttons[0].min_x() >= insets.header_left,
+                "{layout:?}: the button is under the window's controls: {:?} in {insets:?}",
+                buttons[0]
+            );
 
-        // In the header's own padding from its top-left corner, where the
-        // button is the first thing in the row.
-        harness.click(header.origin() + vec2f(18., 16.), MouseButton::Left);
+            harness.click(center(buttons[0]), MouseButton::Left);
 
-        assert!(floats(&harness), "the button did not bring the tabs up");
+            assert!(
+                floats(&harness),
+                "{layout:?}: the button did not bring the tabs up"
+            );
+        }
     }
 
     #[test]
