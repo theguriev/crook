@@ -1543,7 +1543,7 @@ fn paint_menu(
 
     // Recorded for hit testing, so that a press on the list is the list's:
     // the output under it asks whether it is covered, and it is.
-    let radius = CornerRadius::with_all(Radius::Pixels(6.));
+    let radius = CornerRadius::with_all(Radius::Pixels(crate::style::radius::MEDIUM));
     let bounds = RectF::new(vec2f(left, top), size);
     scene
         .draw_rect_with_hit_recording(bounds)
@@ -1563,7 +1563,9 @@ fn paint_menu(
                     vec2f(inner as f32 * metrics.width + padding, metrics.height),
                 ))
                 .with_background(theme().overlay_2)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    crate::style::radius::SMALL,
+                )));
         }
         paint_cells(&item.candidate, names, row_at, metrics, font, scene, |at| {
             if item.matched.contains(&at) {

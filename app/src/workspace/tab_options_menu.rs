@@ -59,7 +59,7 @@ use super::window_room::WindowRoom;
 const POPUP_WIDTH: f32 = 200.;
 
 /// The corner radius of the popup shell and of a segmented control's track.
-const POPUP_RADIUS: f32 = 6.;
+const POPUP_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The least the popup is shortened to for a window shorter than it: a few
 /// rows' worth, under which a menu that scrolls is a menu nobody can read.
@@ -77,11 +77,14 @@ const ICON_SIZE: f32 = 16.;
 /// icon here is smaller than the box it sits in.
 const CHECK_SIZE: f32 = 13.;
 
-/// Every label in the menu except the two "View as" segments.
-const LABEL_SIZE: f32 = 12.;
-
-/// The one 14px text in the popup: a "View as" segment.
-const SEGMENT_LABEL_SIZE: f32 = 14.;
+/// Every label in the menu, the two "View as" segments among them.
+///
+/// The segments used to be set at 14, the one size in the popup that nothing
+/// else in Crook used. A segment is a choice between two words in a row of
+/// choices, which is what every other label here is too, and the extra two
+/// points made "Tabs" and "Panes" read as headings over the rest of the menu
+/// rather than as two of its options.
+const LABEL_SIZE: f32 = crate::style::text::BODY;
 
 /// What the "PR link" toggle admits when hovered.
 ///
@@ -421,7 +424,9 @@ fn segment_pill(
 ) -> Box<dyn Element> {
     Container::new(Align::new(content).finish())
         .with_background_color(segment_background(is_selected, is_hovered))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .with_vertical_padding(2.)
         .finish()
 }
@@ -439,7 +444,7 @@ fn text_segment(
 ) -> Box<dyn Element> {
     Hoverable::new(state, move |mouse| {
         segment_pill(
-            Text::new(label, ui, SEGMENT_LABEL_SIZE)
+            Text::new(label, ui, LABEL_SIZE)
                 .with_color(if is_selected {
                     theme().text_primary
                 } else {
@@ -642,7 +647,7 @@ fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
 /// clipped as a belt to those braces, since a face wider than the count
 /// assumed would have painted past the border.
 fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
-    let paragraph = Paragraph::new(text.to_owned(), ui, 11.)
+    let paragraph = Paragraph::new(text.to_owned(), ui, crate::style::text::CAPTION)
         .with_color(theme().text_primary)
         .finish();
 
@@ -650,7 +655,9 @@ fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
         Container::new(paragraph)
             .with_background_color(theme().surface_raised)
             .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                crate::style::radius::SMALL,
+            )))
             .with_padding(Padding {
                 top: 4.,
                 left: 8.,

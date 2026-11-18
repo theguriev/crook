@@ -61,7 +61,7 @@ use super::view::Fonts;
 pub(crate) const HEIGHT: f32 = 26.;
 
 /// The type size, matching the rail's own rows.
-const TEXT_SIZE: f32 = 12.;
+const TEXT_SIZE: f32 = crate::style::text::BODY;
 
 /// The magnifier, and the gap after it.
 const ICON_SIZE: f32 = 12.;
@@ -421,7 +421,9 @@ impl Element for TextField {
             .draw_rect_with_hit_recording(RectF::new(origin, size))
             .with_background(theme().overlay_1)
             .with_border(Border::all(1.).with_border_color(border))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)));
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                crate::style::radius::MEDIUM,
+            )));
         ctx.scene
             .request_pointer(RectF::new(origin, size), PointerShape::Text);
 

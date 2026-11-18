@@ -96,14 +96,14 @@ pub(super) const MENU_WIDTH: f32 = 232.;
 const ROW_INSET: f32 = 12.;
 
 /// The popup's corner radius, which is every other menu's in this application.
-const MENU_RADIUS: f32 = 6.;
+const MENU_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The least the menu is shortened to for a window shorter than it: a few
 /// entries' worth, under which a menu that scrolls is a menu nobody can read.
 const MENU_LEAST_HEIGHT: f32 = 120.;
 
 /// The size of an entry's label.
-const LABEL_SIZE: f32 = 12.;
+const LABEL_SIZE: f32 = crate::style::text::BODY;
 
 /// The size of the chevron on the one row that has one.
 const CHEVRON_SIZE: f32 = 12.;
@@ -113,7 +113,7 @@ const CHEVRON_SIZE: f32 = 12.;
 /// Smaller than the label, because it is the answer to a question nobody asked
 /// yet: a person reads the row, and the chord is what they find when they
 /// wonder whether there is a faster way to do it again.
-const CHORD_SIZE: f32 = 10.5;
+const CHORD_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The diameter of one colour swatch.
 const SWATCH_SIZE: f32 = 16.;
@@ -593,7 +593,7 @@ const EMOJI_SIZE: f32 = 15.;
 
 /// A cell's corner, which is a control's and not a swatch's: a grid of
 /// circles would read as a grid of colours.
-const EMOJI_RADIUS: f32 = 4.;
+const EMOJI_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// Every entry, live or not, with or without a chevron.
 fn build_row(

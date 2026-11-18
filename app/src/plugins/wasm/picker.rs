@@ -63,7 +63,7 @@ const VISIBLE_ROWS: f32 = 8.;
 const GAP: f32 = 8.;
 
 /// The type size in a row, and in a menu entry.
-const TEXT_SIZE: f32 = 12.;
+const TEXT_SIZE: f32 = crate::style::text::BODY;
 
 /// The icon in front of a row's label, and the gap after it.
 const ICON_SIZE: f32 = 13.;
@@ -71,12 +71,12 @@ const ICON_GAP: f32 = 8.;
 
 /// A row's own inset, and its corner.
 const ROW_PADDING: f32 = 7.;
-const ROW_RADIUS: f32 = 5.;
+const ROW_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// What a menu is drawn as: its width, its inset and its corner.
 const MENU_WIDTH: f32 = 200.;
 const MENU_PADDING: f32 = 4.;
-const MENU_RADIUS: f32 = 8.;
+const MENU_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The gap between the thing pressed and the menu that opened.
 const MENU_OFFSET: f32 = 4.;

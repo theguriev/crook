@@ -71,20 +71,20 @@ use super::super::action::WorkspaceAction;
 /// The size a page's own title is set in.
 ///
 /// Warp's is 23px against a 12px body. Crook's whole interface lives between
-/// 10 and 14, and a 23px heading inside a 720px card reads as a different
+/// 11 and 16, and a 23px heading inside a 720px card reads as a different
 /// application's dialog dropped into this one, so the ratio is kept and the
 /// absolute size is not.
-pub(crate) const TITLE_SIZE: f32 = 16.;
+pub(crate) const TITLE_SIZE: f32 = crate::style::text::TITLE;
 
 /// A category heading, above a group of rows.
-pub(crate) const CATEGORY_SIZE: f32 = 11.;
+pub(crate) const CATEGORY_SIZE: f32 = crate::style::text::CAPTION;
 
 /// A row's label, and the interface's default size everywhere else.
-pub(crate) const LABEL_SIZE: f32 = 12.;
+pub(crate) const LABEL_SIZE: f32 = crate::style::text::BODY;
 
 /// A row's second line, and every other piece of text that is explaining
 /// rather than naming.
-pub(crate) const DESCRIPTION_SIZE: f32 = 11.;
+pub(crate) const DESCRIPTION_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The check on the chosen row of a picker.
 const CHECK_SIZE: f32 = 13.;
@@ -117,7 +117,7 @@ const KNOB_SIZE: f32 = 12.;
 const KNOB_INSET: f32 = 2.;
 
 /// The corner radius of a segmented control's track and of a button.
-const CONTROL_RADIUS: f32 = 6.;
+const CONTROL_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The height a row that answers a question is held to, whatever control is
 /// in it.
@@ -760,14 +760,14 @@ pub(crate) fn choice(
 }
 
 /// The corner of a choice row's hover.
-const CHOICE_RADIUS: f32 = 4.;
+const CHOICE_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// The corner of the box a control that answers a question sits in.
 ///
 /// Softer than a row's, because the box is a *card's* and a card's own
 /// rounding is what makes it read as part of the page rather than as something
 /// dropped on top of it.
-pub(crate) const ANSWER_RADIUS: f32 = 8.;
+pub(crate) const ANSWER_RADIUS: f32 = crate::style::radius::LARGE;
 
 /// The inset inside that box.
 ///
@@ -1647,7 +1647,7 @@ pub(crate) fn current_theme_row(
 }
 
 /// The corner of the current-theme row.
-const THEME_ROW_RADIUS: f32 = 10.;
+const THEME_ROW_RADIUS: f32 = crate::style::radius::LARGE;
 
 /// The least air between a fact's label and its value.
 ///
@@ -1718,10 +1718,18 @@ fn fact_row(
                 1.,
                 Align::new(
                     Container::new(
-                        Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
-                            .with_color(theme().text_primary)
-                            .with_ellipsis(cut)
-                            .finish(),
+                        Text::new(
+                            value,
+                            family,
+                            if monospace {
+                                crate::style::text::CAPTION
+                            } else {
+                                LABEL_SIZE
+                            },
+                        )
+                        .with_color(theme().text_primary)
+                        .with_ellipsis(cut)
+                        .finish(),
                     )
                     .with_margin_left(FACT_GAP)
                     .finish(),

@@ -58,11 +58,11 @@ pub(super) const NEW_TAB_HEIGHT: f32 = 40.;
 
 /// The corner radius of that ground.
 ///
-/// Five rather than the rows' four, which is the radius the `+` has had since
-/// it was in the control bar. It is also what tells the two apart in the
-/// scene: every other rounded box in this panel is a row, a card or a close
-/// button at four.
-const PLUS_RADIUS: f32 = 5.;
+/// A control's corner rather than the rows' smaller one. The `+` spans the
+/// list's width the way a row does, but it is a button standing under the
+/// list rather than one more entry in it, and taking the rows' corner was the
+/// one thing that would have made it read as an empty tab.
+const PLUS_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The band under the last row, and the `+` centred in it.
 ///

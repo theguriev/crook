@@ -93,21 +93,25 @@ fn unreadable_row(
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(
-                Text::new(name, ui, 12.)
+                Text::new(name, ui, crate::style::text::BODY)
                     .with_color(theme().text_muted)
                     .with_ellipsis(Cut::Start)
                     .finish(),
             )
             .with_child(
                 Container::new(
-                    Paragraph::new(format!("could not be read: {}", unreadable.why), ui, 10.)
-                        .with_color(theme().text_muted)
-                        .with_line_height_ratio(1.35)
-                        // The reason may name the file in full; the name
-                        // above already says which, so the end is the part
-                        // to keep.
-                        .with_cut(Cut::Start)
-                        .finish(),
+                    Paragraph::new(
+                        format!("could not be read: {}", unreadable.why),
+                        ui,
+                        crate::style::text::CAPTION,
+                    )
+                    .with_color(theme().text_muted)
+                    .with_line_height_ratio(1.35)
+                    // The reason may name the file in full; the name
+                    // above already says which, so the end is the part
+                    // to keep.
+                    .with_cut(Cut::Start)
+                    .finish(),
                 )
                 .with_margin_top(3.)
                 .finish(),
@@ -160,7 +164,7 @@ fn row(
         .with_child(Align::new(card).finish())
         .with_child(
             Container::new(
-                Text::new(name, ui, 12.)
+                Text::new(name, ui, crate::style::text::BODY)
                     .with_color(theme().text_primary)
                     .finish(),
             )
@@ -169,7 +173,7 @@ fn row(
         );
     column.add_child(
         Container::new(
-            Text::new(origin, ui, 10.)
+            Text::new(origin, ui, crate::style::text::CAPTION)
                 .with_color(theme().text_muted)
                 .finish(),
         )
@@ -184,7 +188,9 @@ fn row(
             } else {
                 Color::TRANSPARENT
             })
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                crate::style::radius::MEDIUM,
+            )))
             .with_padding(Padding {
                 top: ROW_PADDING,
                 bottom: ROW_PADDING,

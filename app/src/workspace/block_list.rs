@@ -151,7 +151,7 @@ const CONTROL_GAP: f32 = 4.;
 pub(super) const CONTROL_OFFSET: f32 = 12.;
 
 /// How round the control's plate is.
-const CONTROL_RADIUS: f32 = 5.;
+const CONTROL_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The icon inside a plate, centred.
 ///

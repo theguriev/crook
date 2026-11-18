@@ -105,7 +105,7 @@ pub(crate) const ROW_PADDING: Padding = Padding {
     right: 8.,
 };
 /// See [`ROW_PADDING`].
-pub(crate) const ROW_RADIUS: f32 = 6.;
+pub(crate) const ROW_RADIUS: f32 = crate::style::radius::MEDIUM;
 /// See [`ROW_PADDING`].
 pub(crate) const ROW_GAP: f32 = 2.;
 
