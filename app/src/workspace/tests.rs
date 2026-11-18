@@ -8394,10 +8394,10 @@ fn shell_only_makes_the_worktree_it_always_made_and_types_nothing() {
     );
     let menu = worktree_menu_box(&scene).expect("the menu is up");
     let text = text_where(&scene, |position| menu.contains_point(position));
-    assert_eq!(
-        text.matches("Start").count(),
-        1,
-        "a Start button with no agent to start, beside \"Start from\": {text}"
+    assert!(
+        !worktree_menu_reads(&scene, super::tab_menu::RUN_NOW),
+        "a {:?} button with no agent to run: {text}",
+        super::tab_menu::RUN_NOW
     );
 
     harness.click(
@@ -8406,6 +8406,25 @@ fn shell_only_makes_the_worktree_it_always_made_and_types_nothing() {
     );
     assert_eq!(harness.worktree_agent(), Some("claude"));
     let scene = harness.frame();
+    // With an agent picked, the second button is there, named for what it
+    // does that Create does not, and the sentence over the buttons says
+    // what that is, naming the program.
+    let menu = worktree_menu_box(&scene).expect("the menu is up");
+    let text = text_where(&scene, |position| menu.contains_point(position));
+    // Twice: once on the button, once in the sentence naming it.
+    let squeezed: String = text.split_whitespace().collect();
+    assert_eq!(
+        squeezed
+            .matches(&super::tab_menu::RUN_NOW.replace(' ', ""))
+            .count(),
+        2,
+        "no {:?} button with an agent picked: {text}",
+        super::tab_menu::RUN_NOW
+    );
+    assert!(
+        worktree_menu_reads(&scene, &super::tab_menu::run_now_hint("claude")),
+        "nothing says what Create does with the agent's line: {text}"
+    );
     harness.click(
         center(worktree_row_saying(&scene, "Shell only")),
         MouseButton::Left,
