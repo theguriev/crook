@@ -403,7 +403,7 @@ const BRIGHT_STEP: f32 = 0.05;
 /// the way. Otherwise the other side, which can — of black and white one is
 /// always at least 4.58:1 against any colour, the square root of 21.
 fn lightens(color: Color, background: Color) -> bool {
-    let above = relative_luminance(color) >= relative_luminance(background);
+    let above = super::relative_luminance(color) >= super::relative_luminance(background);
     let reaches = |lighter: bool| {
         let end = if lighter { Color::WHITE } else { Color::BLACK };
         contrast(end, background) >= TEXT_CONTRAST
@@ -459,30 +459,13 @@ fn carried(color: Color, background: Color, lighten: bool, past: Option<f32>) ->
 }
 
 /// The WCAG 2.0 contrast ratio between two colours, 1 to 21.
+///
+/// [`super::contrast_ratio`], which lives beside [`Theme::derived`] because
+/// the derivation asks it too, at compile time, and so has to be a `const
+/// fn`. One function rather than two, so that what the derivation promised
+/// and what anything here measures can never disagree in the last digit.
 pub(crate) fn contrast(left: Color, right: Color) -> f32 {
-    let (lighter, darker) = {
-        let (left, right) = (relative_luminance(left), relative_luminance(right));
-        if left > right {
-            (left, right)
-        } else {
-            (right, left)
-        }
-    };
-    (lighter + 0.05) / (darker + 0.05)
-}
-
-/// WCAG relative luminance: the sRGB gamma curve undone, then weighted.
-fn relative_luminance(color: Color) -> f32 {
-    let channel = |value: u8| {
-        let value = f32::from(value) / 255.;
-        if value <= 0.03928 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
-
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    super::contrast_ratio(left, right) as f32
 }
 
 /// A colour in CIE L\*a\*b\*, where distance means what the eye means by it.
