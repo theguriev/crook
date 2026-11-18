@@ -42,9 +42,9 @@ use crate::workspace::{Fonts, WorkspaceAction};
 use super::picker::{self, Held};
 
 /// The three sizes, in the interface's own numbers.
-const SMALL: f32 = 10.5;
-const BODY: f32 = 12.;
-const LARGE: f32 = 16.;
+const SMALL: f32 = crate::style::text::CAPTION;
+const BODY: f32 = crate::style::text::BODY;
+const LARGE: f32 = crate::style::text::TITLE;
 
 /// How big the words and the marks are in the place this contribution is
 /// drawn.
@@ -123,7 +123,7 @@ impl Scale {
 /// reports a state — and the moment a chip is wide enough to hold a mark and a
 /// number beside it, the two semicircular ends read as slack rather than as
 /// shape. Six is what a button, a menu and a panel already use here.
-const PRESS_RADIUS: f32 = 6.;
+const PRESS_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// What a pressable puts between its content and its own edge.
 ///
@@ -176,7 +176,7 @@ const RULE_HEIGHT: f32 = 1.;
 const PANEL_WIDTH: f32 = 280.;
 
 /// Its corner, matching the options menu's.
-const PANEL_RADIUS: f32 = 6.;
+const PANEL_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// Above the first row and below the last.
 const PANEL_PADDING: f32 = 10.;
@@ -384,7 +384,7 @@ const CHIP_GAP: f32 = 5.;
 /// A chip's corner. Smaller than a badge's, which is a capsule: a chip is a
 /// box with the corners taken off, which is what every terminal that draws one
 /// does.
-const CHIP_RADIUS: f32 = 5.;
+const CHIP_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// See [`BOUNDED`].
 const UNBOUNDED: bool = false;
@@ -692,7 +692,9 @@ fn button(
             .finish(),
     )
     .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+        crate::style::radius::MEDIUM,
+    )))
     .with_padding(Padding {
         top: 4.,
         bottom: 4.,

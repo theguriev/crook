@@ -102,7 +102,7 @@ impl RowLine {
     /// The line as elements: the branch mark, then the text.
     ///
     /// The mark is `size - 2` and sits 2px from the text, which is Warp's
-    /// `render_git_branch_text` — 10px beside a 12pt title, 8px beside a 10pt
+    /// `render_git_branch_text` — 10px beside a 12pt title, 9px beside an 11pt
     /// metadata line.
     pub(super) fn render(
         self,
@@ -615,7 +615,7 @@ pub(super) const PULL_REQUEST_LABEL_WIDTH: f32 = 100.;
 /// whose it is, and the number is the part that says which.
 fn pull_request_text(label: String, color: Color, ui: FamilyId) -> Box<dyn Element> {
     ConstrainedBox::new(
-        Text::new(label, ui, 10.)
+        Text::new(label, ui, crate::style::text::CAPTION)
             .with_color(color)
             .with_ellipsis(Cut::Start)
             .finish(),
@@ -639,7 +639,9 @@ fn pill(content: Box<dyn Element>, background: Color) -> Box<dyn Element> {
             right: 4.,
         })
         .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
 }
 
@@ -650,7 +652,7 @@ fn diff_chip(chip: &DiffChip, room: Room, ui: FamilyId) -> Box<dyn Element> {
 
     for (index, piece) in chip.pieces(room).into_iter().enumerate() {
         if index > 0 {
-            row.add_child(Text::new(" ", ui, 10.).finish());
+            row.add_child(Text::new(" ", ui, crate::style::text::CAPTION).finish());
         }
 
         let (color, weight) = match piece.tint {
@@ -658,7 +660,7 @@ fn diff_chip(chip: &DiffChip, room: Room, ui: FamilyId) -> Box<dyn Element> {
             Tint::Added => (theme().diff_added, Weight::Semibold),
             Tint::Removed => (theme().diff_removed, Weight::Semibold),
         };
-        let text = Text::new(piece.text, ui, 10.)
+        let text = Text::new(piece.text, ui, crate::style::text::CAPTION)
             .with_color(color)
             .with_style(Properties {
                 weight,
@@ -755,7 +757,9 @@ pub(super) fn detail_card(
         Container::new(column.finish())
             .with_background_color(theme().surface_raised)
             .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                crate::style::radius::SMALL,
+            )))
             .finish(),
     )
     .with_width(CARD_WIDTH)
@@ -812,15 +816,19 @@ fn detail_section(
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(4.)
         .with_child(
-            Text::new(session.display_title().to_owned(), ui, 12.)
-                .with_color(theme().text_primary)
-                .with_ellipsis(Cut::End)
-                .finish(),
+            Text::new(
+                session.display_title().to_owned(),
+                ui,
+                crate::style::text::BODY,
+            )
+            .with_color(theme().text_primary)
+            .with_ellipsis(Cut::End)
+            .finish(),
         );
 
     if let Some(friendly) = session.shown_path(home) {
         column.add_child(
-            Text::new(friendly, ui, 12.)
+            Text::new(friendly, ui, crate::style::text::BODY)
                 .with_color(theme().text_muted)
                 .with_ellipsis(Cut::Start)
                 .finish(),
@@ -830,7 +838,7 @@ fn detail_section(
     // The whole name, where the row had room for only its first part.
     if let Some(remote) = &session.remote {
         column.add_child(
-            Text::new(format!("on {}", remote.host), ui, 12.)
+            Text::new(format!("on {}", remote.host), ui, crate::style::text::BODY)
                 .with_color(theme().text_muted)
                 .with_ellipsis(Cut::End)
                 .finish(),
@@ -851,10 +859,14 @@ fn detail_section(
     // the card is where a row says what it could not fit.
     if let Some(lineage) = &session.spawned_by {
         column.add_child(
-            Text::new(format!("opened by {}", lineage.title), ui, 12.)
-                .with_color(theme().text_muted)
-                .with_ellipsis(Cut::End)
-                .finish(),
+            Text::new(
+                format!("opened by {}", lineage.title),
+                ui,
+                crate::style::text::BODY,
+            )
+            .with_color(theme().text_muted)
+            .with_ellipsis(Cut::End)
+            .finish(),
         );
     }
 
@@ -863,9 +875,13 @@ fn detail_section(
         .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
-            Text::new(format!("agent \u{b7} {}", status.label()), ui, 10.)
-                .with_color(theme().text_muted)
-                .finish(),
+            Text::new(
+                format!("agent \u{b7} {}", status.label()),
+                ui,
+                crate::style::text::CAPTION,
+            )
+            .with_color(theme().text_muted)
+            .finish(),
         );
     if let Some(chips) = Chips::everything(session, facts).render(Room::Card, ui) {
         // Flexible, so the chips are laid out against what the status leaves
@@ -884,7 +900,7 @@ fn detail_section(
     // the host.
     if let Some(pull_request) = &session.pull_request {
         column.add_child(
-            Text::new(pull_request.url.clone(), ui, 10.)
+            Text::new(pull_request.url.clone(), ui, crate::style::text::CAPTION)
                 .with_color(theme().text_muted)
                 .with_ellipsis(Cut::End)
                 .finish(),
@@ -900,7 +916,7 @@ fn detail_section(
         .and_then(|pull_request| pull_request.check.as_ref())
     {
         column.add_child(
-            Text::new(check.summary(), ui, 10.)
+            Text::new(check.summary(), ui, crate::style::text::CAPTION)
                 .with_color(check_color(check))
                 .with_ellipsis(Cut::End)
                 .finish(),
@@ -946,9 +962,16 @@ pub(super) fn metadata_line(
 
     // Shrinkable, so the text clips before it ever squeezes a chip.
     row.add_child(match left {
-        Some(left) => {
-            Shrinkable::new(1., left.render(10., theme().text_muted, Weight::Normal, ui)).finish()
-        }
+        Some(left) => Shrinkable::new(
+            1.,
+            left.render(
+                crate::style::text::CAPTION,
+                theme().text_muted,
+                Weight::Normal,
+                ui,
+            ),
+        )
+        .finish(),
         None => Empty::new().finish(),
     });
 

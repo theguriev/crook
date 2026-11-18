@@ -1844,7 +1844,7 @@ fn header(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 /// its own.
 fn title_row(ui: FamilyId) -> Box<dyn Element> {
     Container::new(
-        Text::new(TITLE, ui, 16.)
+        Text::new(TITLE, ui, crate::style::text::TITLE)
             .with_color(theme().text_primary)
             .with_style(Properties {
                 weight: Weight::Semibold,
@@ -1879,7 +1879,7 @@ fn base_line(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     };
 
     Container::new(
-        Text::new(text, ui, 11.)
+        Text::new(text, ui, crate::style::text::CAPTION)
             .with_color(theme().text_muted)
             .with_ellipsis(Cut::End)
             .finish(),
@@ -1909,7 +1909,7 @@ fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                 .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(
-                    Paragraph::new(adrift.caption().to_owned(), ui, 11.)
+                    Paragraph::new(adrift.caption().to_owned(), ui, crate::style::text::CAPTION)
                         .with_color(theme().text_muted)
                         .with_line_height_ratio(1.4)
                         .finish(),
@@ -1965,7 +1965,7 @@ fn review_bar(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                 .with_child(
                     Expanded::new(
                         1.,
-                        Paragraph::new(note.to_owned(), ui, 11.)
+                        Paragraph::new(note.to_owned(), ui, crate::style::text::CAPTION)
                             .with_color(theme().text_muted)
                             .with_line_height_ratio(1.4)
                             .finish(),
@@ -2055,7 +2055,7 @@ fn row(workspace: &Workspace, row: &Row) -> Box<dyn Element> {
 
     let content = match row {
         Row::Heading(text) => Align::new(
-            Text::new(text.clone(), fonts.ui, 11.)
+            Text::new(text.clone(), fonts.ui, crate::style::text::CAPTION)
                 .with_color(theme().text_muted)
                 .with_style(Properties {
                     weight: Weight::Semibold,
@@ -2117,7 +2117,7 @@ fn row(workspace: &Workspace, row: &Row) -> Box<dyn Element> {
 fn sentence(text: &str, indent: f32, ui: FamilyId) -> Box<dyn Element> {
     Align::new(
         Container::new(
-            Text::new(text.to_owned(), ui, 11.)
+            Text::new(text.to_owned(), ui, crate::style::text::CAPTION)
                 .with_color(theme().text_muted)
                 .with_ellipsis(Cut::End)
                 .finish(),
@@ -2136,9 +2136,13 @@ fn commit_row(commit: &crate::git::changes::Commit, fonts: super::Fonts) -> Box<
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
             Container::new(
-                Text::new(commit.sha.clone(), fonts.monospace, 11.)
-                    .with_color(theme().text_muted)
-                    .finish(),
+                Text::new(
+                    commit.sha.clone(),
+                    fonts.monospace,
+                    crate::style::text::CAPTION,
+                )
+                .with_color(theme().text_muted)
+                .finish(),
             )
             .with_margin_right(8.)
             .finish(),
@@ -2147,7 +2151,7 @@ fn commit_row(commit: &crate::git::changes::Commit, fonts: super::Fonts) -> Box<
             Expanded::new(
                 1.,
                 Align::new(
-                    Text::new(commit.subject.clone(), fonts.ui, 12.)
+                    Text::new(commit.subject.clone(), fonts.ui, crate::style::text::BODY)
                         .with_color(theme().text_primary)
                         .with_ellipsis(Cut::End)
                         .finish(),
@@ -2159,7 +2163,7 @@ fn commit_row(commit: &crate::git::changes::Commit, fonts: super::Fonts) -> Box<
         )
         .with_child(
             Container::new(
-                Text::new(commit.when.clone(), fonts.ui, 10.)
+                Text::new(commit.when.clone(), fonts.ui, crate::style::text::CAPTION)
                     .with_color(theme().text_muted)
                     .finish(),
             )
@@ -2228,7 +2232,7 @@ fn file_row(
                 .with_child(
                     ConstrainedBox::new(
                         Align::new(
-                            Text::new(letter.clone(), fonts.monospace, 11.)
+                            Text::new(letter.clone(), fonts.monospace, crate::style::text::CAPTION)
                                 .with_color(color)
                                 .finish(),
                         )
@@ -2242,7 +2246,7 @@ fn file_row(
                     Expanded::new(
                         1.,
                         Align::new(
-                            Text::new(path.clone(), fonts.ui, 12.)
+                            Text::new(path.clone(), fonts.ui, crate::style::text::BODY)
                                 .with_color(theme().text_primary)
                                 .with_ellipsis(Cut::Start)
                                 .finish(),
@@ -2259,7 +2263,9 @@ fn file_row(
         } else {
             Color::TRANSPARENT
         })
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
     })
     .on_click(move |_, ctx, _| {
@@ -2334,7 +2340,7 @@ fn diff_line(text: &str, monospace: FamilyId) -> Box<dyn Element> {
     let shown = text.replace('\t', "    ");
 
     Align::new(
-        Text::new(shown, monospace, 11.)
+        Text::new(shown, monospace, crate::style::text::CAPTION)
             .with_color(color)
             .with_ellipsis(Cut::End)
             .finish(),
@@ -2401,7 +2407,7 @@ fn comment_row(workspace: &Workspace, comment: &Comment, ui: FamilyId) -> Box<dy
                 Expanded::new(
                     1.,
                     Align::new(
-                        Text::new(comment.text.clone(), ui, 12.)
+                        Text::new(comment.text.clone(), ui, crate::style::text::BODY)
                             .with_color(theme().text_primary)
                             .with_ellipsis(Cut::End)
                             .finish(),
@@ -2523,7 +2529,7 @@ fn text_button(
     let live = action.is_some();
     let button = Hoverable::new(state, move |mouse| {
         Container::new(
-            Text::new(label.clone(), ui, 11.)
+            Text::new(label.clone(), ui, crate::style::text::CAPTION)
                 .with_color(if live {
                     theme().text_primary
                 } else {
@@ -2543,7 +2549,9 @@ fn text_button(
             Color::TRANSPARENT
         })
         .with_border(Border::all(1.).with_border_color(theme().border))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
     });
     match action {
@@ -2576,7 +2584,9 @@ fn close_button(workspace: &Workspace) -> Box<dyn Element> {
             .finish(),
         )
         .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
     })
     .on_click(|_, ctx, _| {

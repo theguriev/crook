@@ -89,7 +89,7 @@ const LIST_LEAST_WIDTH: f32 = 220.;
 const LIST_LEAST_HEIGHT: f32 = 160.;
 
 /// The list's corner radius, which is the card's and every menu's.
-const LIST_RADIUS: f32 = 6.;
+const LIST_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// How tall a row is, its two lines and the air around them. Fixed, so that
 /// the keyboard's row can be scrolled into view without measuring anything.

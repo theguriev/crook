@@ -73,7 +73,7 @@ use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE};
 const ICON_GAP: f32 = 8.;
 
 /// Warp's `ROW_CORNER_RADIUS`.
-const ROW_RADIUS: f32 = 4.;
+const ROW_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// How strong the wash on a waiting row is, out of 255.
 ///
@@ -95,18 +95,19 @@ pub(in crate::workspace) fn waiting_wash() -> Color {
 pub(super) const ROW_PADDING: f32 = 8.;
 
 /// The title line, in both densities.
-const TITLE_SIZE: f32 = 12.;
+const TITLE_SIZE: f32 = crate::style::text::BODY;
 
 /// A `Compact` row's second line.
-const SUBTITLE_SIZE: f32 = 10.;
+const SUBTITLE_SIZE: f32 = crate::style::text::CAPTION;
 
 /// An `Expanded` row's second line.
 ///
-/// Twelve, not ten. Warp's `render_text_line` hardcodes `12.` and only line
-/// 3's left text, the `Compact` subtitle and the group header are 10pt.
-/// Rendering this at 10 makes `Expanded` look like a taller `Compact` instead
-/// of a different row.
-const DESCRIPTION_SIZE: f32 = 12.;
+/// The body size, not the caption. Warp's `render_text_line` hardcodes `12.`
+/// and only line 3's left text, the `Compact` subtitle and the group header
+/// are its 10pt, which Crook sets at the 11pt caption. Rendering this at the
+/// caption makes `Expanded` look like a taller `Compact` instead of a
+/// different row.
+const DESCRIPTION_SIZE: f32 = crate::style::text::BODY;
 
 /// The gap between a `Compact` row's two lines.
 const COMPACT_LINE_GAP: f32 = 1.;
@@ -657,7 +658,9 @@ pub(super) fn close_slot(
             } else {
                 Color::TRANSPARENT
             })
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                crate::style::radius::SMALL,
+            )))
             .finish()
         })
         .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Tab(action)))

@@ -123,7 +123,9 @@ pub(crate) fn card(
             Container::new(grid)
                 .with_background_color(card.terminal.background)
                 .with_border(Border::all(if selected { 2. } else { 1. }).with_border_color(outline))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    crate::style::radius::MEDIUM,
+                )))
                 .with_uniform_padding(if size.x() > 150. { 8. } else { 6. })
                 .finish(),
         )

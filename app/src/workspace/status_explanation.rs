@@ -67,7 +67,7 @@ use super::tab_menu::{LABEL_SIZE, MENU_WIDTH, PATH_SIZE, ROW_INSET};
 use super::view::Workspace;
 
 /// The popup's corner radius, which is every other menu's in this application.
-const PANEL_RADIUS: f32 = 6.;
+const PANEL_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The whole panel: a heading, and one sentence per fact.
 pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {

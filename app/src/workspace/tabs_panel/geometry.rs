@@ -131,6 +131,17 @@ enum Tracks {
     Heading(GroupId),
 }
 
+/// How far a row may be past an edge of the viewport and still count as
+/// inside it.
+///
+/// A row's height is a sum of line heights, and the caption's line is not a
+/// whole number of pixels: a row scrolled to the bottom edge last frame is
+/// measured again this frame as a ten-thousandth of a pixel past it, and
+/// without this every reselection of the same row nudged the list by that
+/// much. A hundredth is far below anything a screen can show and far above
+/// any rounding a sum of a few dozen rows can pile up.
+const SCROLL_SLACK: f32 = 0.01;
+
 /// The offset a viewport has to be scrolled to for `row` to be inside it, or
 /// `None` when it already is.
 ///
@@ -139,10 +150,10 @@ enum Tracks {
 /// selection walked down the list moves the view by one row at a time rather
 /// than jumping the row to the middle.
 pub(crate) fn scroll_for(row: RowBox, offset: f32, viewport: f32) -> Option<f32> {
-    if row.top < offset {
+    if row.top < offset - SCROLL_SLACK {
         return Some(row.top);
     }
-    if row.top + row.height <= offset + viewport {
+    if row.top + row.height <= offset + viewport + SCROLL_SLACK {
         return None;
     }
 
@@ -305,6 +316,16 @@ mod tests {
     fn a_row_already_in_view_scrolls_nowhere() {
         assert_eq!(scroll_for(row(40., 30.), 0., 200.), None);
         assert_eq!(scroll_for(row(40., 30.), 40., 30.), None, "exactly filling");
+    }
+
+    #[test]
+    fn a_row_a_rounding_error_past_an_edge_scrolls_nowhere() {
+        // Rows of caption-height lines are not whole pixels tall, and a row
+        // scrolled flush to the bottom last frame can come back measured a
+        // ten-thousandth past it. Moving the list by that is a list that
+        // creeps every time the same row is selected again.
+        assert_eq!(scroll_for(row(1600., 46.6), 1438.7996, 207.8006), None);
+        assert_eq!(scroll_for(row(99.9998, 30.), 100., 200.), None);
     }
 
     #[test]

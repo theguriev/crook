@@ -101,8 +101,10 @@ fn swatches(workspace: &Workspace, draft: &crate::theme::creator::Draft) -> Box<
         let color = *color;
         let chosen = index == draft.chosen;
         let radius = match index {
-            0 => CornerRadius::with_left(Radius::Pixels(6.)),
-            index if index == CANDIDATES - 1 => CornerRadius::with_right(Radius::Pixels(6.)),
+            0 => CornerRadius::with_left(Radius::Pixels(crate::style::radius::MEDIUM)),
+            index if index == CANDIDATES - 1 => {
+                CornerRadius::with_right(Radius::Pixels(crate::style::radius::MEDIUM))
+            }
             _ => CornerRadius::default(),
         };
 
@@ -181,7 +183,7 @@ fn preview(workspace: &Workspace, draft: &crate::theme::creator::Draft) -> Box<d
 /// was written against still ends inside the panel.
 fn note(text: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
     Container::new(
-        Paragraph::new(text, ui, 10.)
+        Paragraph::new(text, ui, crate::style::text::CAPTION)
             .with_color(theme().text_muted)
             .with_line_height_ratio(1.4)
             .finish(),
@@ -197,13 +199,17 @@ fn note(text: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
 /// or on a disk that is full, needs the path and the words to put it right.
 fn complaint(problem: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
     Container::new(
-        Paragraph::new(format!("The theme was not written: {problem}"), ui, 10.)
-            .with_color(theme().usage_critical)
-            .with_line_height_ratio(1.4)
-            // The long word in this sentence is the path that refused, and
-            // a path is known by what it ends in.
-            .with_cut(Cut::Start)
-            .finish(),
+        Paragraph::new(
+            format!("The theme was not written: {problem}"),
+            ui,
+            crate::style::text::CAPTION,
+        )
+        .with_color(theme().usage_critical)
+        .with_line_height_ratio(1.4)
+        // The long word in this sentence is the path that refused, and
+        // a path is known by what it ends in.
+        .with_cut(Cut::Start)
+        .finish(),
     )
     .with_margin_top(10.)
     .finish()
@@ -276,7 +282,7 @@ fn button(
 
         Container::new(
             Align::new(
-                Text::new(label, ui, 11.)
+                Text::new(label, ui, crate::style::text::CAPTION)
                     .with_color(theme().text_primary)
                     .finish(),
             )
@@ -290,7 +296,9 @@ fn button(
         })
         .with_background_color(background)
         .with_border(Border::all(1.).with_border_color(border))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::MEDIUM,
+        )))
         .finish()
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Theme(action)))

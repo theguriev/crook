@@ -440,7 +440,7 @@ fn build_line(workspace: &Workspace, ui: crookui_core::fonts::FamilyId) -> Box<d
                 workspace.channel()
             ),
             ui,
-            10.,
+            crate::style::text::CAPTION,
         )
         .with_color(theme().text_muted)
         .finish(),
@@ -630,7 +630,9 @@ fn nothing_found(query: &Query, ui: crookui_core::fonts::FamilyId) -> Box<dyn El
             .finish(),
     )
     .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+        crate::style::radius::MEDIUM,
+    )))
     .with_uniform_padding(16.)
     .finish()
 }

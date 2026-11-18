@@ -258,15 +258,15 @@ pub(super) const MENU_WIDTH: f32 = 260.;
 pub(super) const ROW_INSET: f32 = 12.;
 
 /// The popup's corner radius, which is the options menu's.
-const MENU_RADIUS: f32 = 6.;
+const MENU_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The least the list face is shortened to for a window shorter than it: a
 /// few rows' worth, under which a list that scrolls is a list nobody can read.
 const MENU_LEAST_HEIGHT: f32 = 120.;
 
 /// The size of the label on a row, and of the line under it.
-pub(super) const LABEL_SIZE: f32 = 12.;
-pub(super) const PATH_SIZE: f32 = 10.5;
+pub(super) const LABEL_SIZE: f32 = crate::style::text::BODY;
+pub(super) const PATH_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The least room between a worktree row's label and whatever shares its
 /// line — the badge, or the ×. A label cut with a mark is cut this far short
@@ -2595,7 +2595,7 @@ pub(super) fn button(
 
         Container::new(
             Align::new(
-                Text::new(label.clone(), ui, 11.)
+                Text::new(label.clone(), ui, crate::style::text::CAPTION)
                     .with_color(if inert {
                         theme().text_muted
                     } else {

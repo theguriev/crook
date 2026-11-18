@@ -263,13 +263,17 @@ fn title_row(workspace: &Workspace, ui: crookui_core::fonts::FamilyId) -> Box<dy
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
-            Text::new(if creating { "New theme" } else { TITLE }, ui, 16.)
-                .with_color(theme().text_primary)
-                .with_style(Properties {
-                    weight: Weight::Semibold,
-                    ..Properties::default()
-                })
-                .finish(),
+            Text::new(
+                if creating { "New theme" } else { TITLE },
+                ui,
+                crate::style::text::TITLE,
+            )
+            .with_color(theme().text_primary)
+            .with_style(Properties {
+                weight: Weight::Semibold,
+                ..Properties::default()
+            })
+            .finish(),
         )
         .with_child(Expanded::new(1., Empty::new().finish()).finish());
 
@@ -295,7 +299,7 @@ fn hint(mode: Mode, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
     };
 
     Container::new(
-        Paragraph::new(text.to_owned(), ui, 11.)
+        Paragraph::new(text.to_owned(), ui, crate::style::text::CAPTION)
             .with_color(theme().text_muted)
             .with_line_height_ratio(1.4)
             .finish(),
@@ -329,7 +333,9 @@ fn icon_button(
             .finish(),
         )
         .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Theme(action)))

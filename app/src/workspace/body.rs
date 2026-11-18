@@ -1284,7 +1284,7 @@ fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
             .with_spacing(9.)
             .with_child(
-                Text::new(pane.title().to_owned(), fonts.ui, 16.)
+                Text::new(pane.title().to_owned(), fonts.ui, crate::style::text::TITLE)
                     .with_color(theme().text_primary)
                     .with_ellipsis(Cut::End)
                     .with_style(Properties {
@@ -1832,7 +1832,7 @@ impl Element for StickyHeader {
             ConstrainedBox::new(
                 Container::new(
                     Align::new(
-                        Text::new(line.clone(), ui, 12.)
+                        Text::new(line.clone(), ui, crate::style::text::BODY)
                             .with_color(theme().text_primary)
                             .with_ellipsis(Cut::End)
                             .finish(),
@@ -2038,7 +2038,7 @@ fn find_bar(
                 1.,
                 ConstrainedBox::new(
                     Align::new(
-                        Text::new(count, workspace.fonts().ui, 11.)
+                        Text::new(count, workspace.fonts().ui, crate::style::text::CAPTION)
                             .with_color(theme().text_muted)
                             .with_ellipsis(Cut::End)
                             .finish(),
@@ -2145,7 +2145,9 @@ fn find_bar(
     Container::new(row.finish())
         .with_background_color(theme().surface_raised)
         .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(7.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::MEDIUM,
+        )))
         .with_padding(Padding {
             top: 5.,
             bottom: 5.,
@@ -2186,7 +2188,9 @@ fn find_switch(
         )
         .with_uniform_padding(FIND_BUTTON_PADDING)
         .with_background_color(ground)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish();
         match note {
             Some(note) if mouse.is_hovered() => noted(switch, note),
@@ -2242,12 +2246,12 @@ fn noted(switch: Box<dyn Element>, note: SwitchNote) -> Box<dyn Element> {
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(10.)
         .with_child(
-            Text::new(note.label, note.ui, 11.)
+            Text::new(note.label, note.ui, crate::style::text::CAPTION)
                 .with_color(theme().text_primary)
                 .finish(),
         )
         .with_child(
-            Text::new(chord, note.ui, 11.)
+            Text::new(chord, note.ui, crate::style::text::CAPTION)
                 .with_color(theme().text_muted)
                 .finish(),
         )
@@ -2255,7 +2259,9 @@ fn noted(switch: Box<dyn Element>, note: SwitchNote) -> Box<dyn Element> {
     let panel = Container::new(words)
         .with_background_color(theme().surface_raised)
         .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .with_padding(Padding {
             top: 4.,
             left: 8.,
@@ -2305,7 +2311,9 @@ fn find_button(
         )
         .with_uniform_padding(FIND_BUTTON_PADDING)
         .with_background_color(ground)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+            crate::style::radius::SMALL,
+        )))
         .finish()
     });
     if enabled {

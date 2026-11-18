@@ -194,7 +194,7 @@ const CARD_LEAST_WIDTH: f32 = 300.;
 const CARD_LEAST_HEIGHT: f32 = 200.;
 
 /// The card's corner radius, which is every menu's in this application.
-const CARD_RADIUS: f32 = 6.;
+const CARD_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// How many lines of the command the card shows at once, at most: fewer in a
 /// window too short for the card to have them all. The rest scrolls, inside

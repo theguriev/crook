@@ -1668,14 +1668,14 @@ fn pill(
 }
 
 /// The chip's type, the same size as a row's chips in the panel.
-const WAITING_TEXT: f32 = 11.;
+const WAITING_TEXT: f32 = crate::style::text::CAPTION;
 /// Its bell, a little larger than the type beside it so the two read as one
 /// line.
 const WAITING_ICON: f32 = 13.;
 /// The air between the bell and the count.
 const WAITING_GAP: f32 = 5.;
-/// The corner the chip is cut to — the pill a row's chips use, one up.
-const WAITING_RADIUS: f32 = 5.;
+/// The corner the chip is cut to, which is the one a row's chips use.
+const WAITING_RADIUS: f32 = crate::style::radius::SMALL;
 
 fn action(name: &str) -> ActionName {
     ActionName::parse(&format!("crook/tabs/{name}")).expect("a name built from a literal")

@@ -110,6 +110,7 @@ mod session;
 mod settings;
 mod shell_history;
 mod shell_integration;
+mod style;
 mod tab;
 mod terminal_font;
 mod terminal_keys;

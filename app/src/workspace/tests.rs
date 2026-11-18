@@ -1987,9 +1987,28 @@ fn composer_boxes(scene: &Scene) -> Vec<RectF> {
         .collect()
 }
 
+/// Whether a painted rect is the band under the list that opens another tab.
+///
+/// A control's corner, which a field, a menu and a card share, so the corner
+/// alone does not find it: the band is the one such box as deep as its slot
+/// less the inset at top and bottom, and as wide as a row.
+fn is_plus_band(rect: &Rect) -> bool {
+    rect.corner_radius.get_top_left() == Radius::Pixels(crate::style::radius::MEDIUM)
+        && (rect.bounds.height() - (super::controls::NEW_TAB_HEIGHT - 16.)).abs() < 0.5
+        && rect.bounds.width() > 100.
+}
+
+/// Every new-tab band in the frame, by its painted box.
+fn plus_bands(scene: &Scene) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| is_plus_band(rect))
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
 /// The button that opens another tab, by its rounded box.
 fn new_tab_box(scene: &Scene) -> RectF {
-    let boxes = rects_rounded_by(scene, Radius::Pixels(5.));
+    let boxes = plus_bands(scene);
     assert_eq!(boxes.len(), 1, "exactly one new-tab button per frame");
     boxes[0]
 }
@@ -2284,8 +2303,19 @@ fn empty_list_space(scene: &Scene) -> Vector2F {
 }
 
 /// The chips a row draws, by their pill boxes.
+///
+/// A chip takes the small corner a row, a close button and the header's
+/// waiting chip take too, so it is told from them by size: a pill is one
+/// caption line and a pixel above and below it, which is shorter than a close
+/// button and than anything else rounded that small.
 fn chip_boxes(scene: &Scene) -> Vec<RectF> {
-    rects_rounded_by(scene, Radius::Pixels(3.))
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(crate::style::radius::SMALL)
+                && rect.bounds.height() < super::CLOSE_BUTTON_SIZE - 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .collect()
 }
 
 /// The hover detail card, by its box.
@@ -9538,7 +9568,7 @@ fn tidying_one_free_checkout_asks_in_the_singular() {
         "the question was not asked in the singular"
     );
     assert!(
-        worktree_menu_says(&scene, "The branch is kept. Only the checkout goes."),
+        worktree_menu_reads(&scene, "The branch is kept. Only the checkout goes."),
         "the promise under it was not made in the singular"
     );
 }
@@ -10297,7 +10327,9 @@ fn deleting_merged_branches_names_each_with_what_proved_it_and_keeps_the_rest() 
 
     harness.dispatch_worktree(WorktreeAction::AskDeleteLanded);
     let scene = harness.frame();
-    for evidence in ["landed", &squash[..7], "landed, squashed"] {
+    // The subject is the last thing on its line and is cut at the menu's edge
+    // like any subject: at the caption size, the end of this one is.
+    for evidence in ["landed", &squash[..7], "landed, squash"] {
         assert!(
             worktree_menu_says(&scene, evidence),
             "the question does not say {evidence:?}"
@@ -13514,10 +13546,11 @@ fn each_density_gives_a_panel_row_the_height_its_lines_add_up_to() {
             density: Density::Compact,
             ..options
         });
-        // max(24, 12*1.2 + 1 + 10*1.2) + 16 + 2.
+        // max(24, 12*1.2 + 1 + 11*1.2) + 16 + 2: the second line is the
+        // chrome's caption, eleven where Warp's is ten.
         assert!(
-            (compact[0].height() - 45.4).abs() < 0.1,
-            "{granularity:?}/Compact is {} tall, not 45.4",
+            (compact[0].height() - 46.6).abs() < 0.1,
+            "{granularity:?}/Compact is {} tall, not 46.6",
             compact[0].height()
         );
         assert!(
@@ -15246,10 +15279,7 @@ fn the_band_under_the_list_lights_up_whole_rather_than_around_its_mark() {
     let scene = harness.frame();
 
     let lit: Vec<RectF> = visible_rects(&scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Pixels(5.)
-                && rect.background == Fill::Solid(theme().overlay_1)
-        })
+        .filter(|(rect, _)| is_plus_band(rect) && rect.background == Fill::Solid(theme().overlay_1))
         .map(|(_, bounds)| bounds)
         .collect();
 
@@ -15289,7 +15319,7 @@ fn a_sidebar_section_gets_neither_the_plus_nor_the_menu_the_list_carries() {
     let scene = harness.frame();
 
     assert!(
-        rects_rounded_by(&scene, Radius::Pixels(5.)).is_empty(),
+        plus_bands(&scene).is_empty(),
         "the settings rail is showing and the tab list's `+` is still drawn"
     );
 
@@ -16467,16 +16497,9 @@ fn overlaps(left: RectF, right: RectF) -> bool {
         && right.min_y() < left.max_y()
 }
 
-/// The `+` button's box, by the only 5px-rounded rect in the frame.
-///
-/// Five is what keeps it out of every other helper here: a row, a card and a
-/// close button are all rounded by four, and the `+` has been the one thing in
-/// the frame rounded by five since it was in the control bar.
+/// The `+` button's box. See [`is_plus_band`].
 fn plus_box(scene: &Scene) -> RectF {
-    let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
-        .map(|(_, bounds)| bounds)
-        .collect();
+    let boxes = plus_bands(scene);
     assert_eq!(boxes.len(), 1, "expected one + button, got {boxes:?}");
     boxes[0]
 }
@@ -22123,7 +22146,8 @@ mod shells {
         fn block_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
             let mut controls: Vec<RectF> = visible_rects(scene)
                 .filter(|(rect, bounds)| {
-                    rect.corner_radius.get_top_left() == Radius::Pixels(5.)
+                    rect.corner_radius.get_top_left()
+                        == Radius::Pixels(crate::style::radius::MEDIUM)
                         && (bounds.width() - bounds.height()).abs() < 0.5
                         && bounds.width() > 20.
                         && bounds.width() < 32.
@@ -25084,7 +25108,8 @@ mod shells {
                 .layers()
                 .flat_map(|layer| layer.rects.iter())
                 .filter(|rect| {
-                    rect.corner_radius.get_top_left() == Radius::Pixels(7.)
+                    rect.corner_radius.get_top_left()
+                        == Radius::Pixels(crate::style::radius::MEDIUM)
                         && rect.background == Fill::Solid(theme().surface_raised)
                 })
                 .map(|rect| rect.bounds)
@@ -30971,7 +30996,7 @@ mod the_agent {
         assert!(frame_text(&scene).contains("1 waiting"));
         // Cut to the row's width, from its end.
         assert!(
-            strip_text(&scene).contains("Claude needs your permission"),
+            strip_text(&scene).contains("Claude needs your permis"),
             "the row did not say what the notification said: {}",
             strip_text(&scene)
         );
@@ -32996,8 +33021,8 @@ fn a_palette_row_s_title_sits_on_the_line_its_keys_and_name_are_centred_on() {
             .map(|glyph| glyph.position.y() - baseline + half)
             .collect()
     };
-    let title = middles(12.);
-    let beside = middles(10.5);
+    let title = middles(crate::style::text::BODY);
+    let beside = middles(crate::style::text::CAPTION);
     assert!(
         !title.is_empty() && !beside.is_empty(),
         "the selected row has no title or nothing beside it"
@@ -48021,7 +48046,7 @@ mod answering_card {
         let row = text_lines(&scene, |at| at.x() < panel.max_x());
         assert!(
             row.iter()
-                .any(|(_, text)| text.contains("true ٣# ;: ٤ ; rm -rf ~")),
+                .any(|(_, text)| text.contains("true ٣# ;: ٤ ; rm -rf")),
             "{row:?}"
         );
     }

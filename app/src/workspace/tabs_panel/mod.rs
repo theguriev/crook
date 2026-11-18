@@ -142,9 +142,12 @@ const GROUP_ITEM_SPACING: f32 = 4.;
 /// Warp's `TABS_MODE_ITEM_SPACING`, between tabs in `Tabs` granularity.
 const TABS_MODE_ITEM_SPACING: f32 = 4.;
 
-/// The group header's text size. Ten, like the `Compact` subtitle and the
-/// metadata line, and unlike everything else in a row.
-const GROUP_HEADER_SIZE: f32 = 10.;
+/// The group header's text size. The caption, like the `Compact` subtitle and
+/// the metadata line, and unlike everything else in a row.
+///
+/// Warp sets all three at ten. Crook sets them at eleven, the chrome's one
+/// secondary size, because ten was judged in review to be too small to read.
+const GROUP_HEADER_SIZE: f32 = crate::style::text::CAPTION;
 
 /// Warp's `TAB_GROUP_MEMBER_INDENT`: how far a group's members sit in from its
 /// heading.
@@ -157,11 +160,11 @@ const MEMBER_INDENT: f32 = 12.;
 
 /// The radius a group's card takes in `Tabs` granularity, where a tab is a
 /// card too. Warp's `ROW_CORNER_RADIUS`, which is the rows' own.
-const GROUP_RADIUS: f32 = 4.;
+const GROUP_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// The heading's own name line, which is a row's title size rather than the
-/// ten of the line under it.
-const HEADING_SIZE: f32 = 12.;
+/// caption of the line under it.
+const HEADING_SIZE: f32 = crate::style::text::BODY;
 
 /// Warp's `TAB_GROUP_ICON_SIZE`: the chevron that says which way the group
 /// folds.
@@ -203,7 +206,7 @@ const SECTION_BAR_PADDING: f32 = 8.;
 /// The icon in one of them, and the name under it.
 const SECTION_ICON_SIZE: f32 = 18.;
 /// See [`SECTION_ICON_SIZE`].
-const SECTION_LABEL_SIZE: f32 = 10.;
+const SECTION_LABEL_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The whole panel: whatever the chosen section puts in it, the row of buttons
 /// that chooses, and — only where the window's own controls are painted over
@@ -309,7 +312,7 @@ fn not_remembered(problem: &str, ui: FamilyId) -> Box<dyn Element> {
         Paragraph::new(
             format!("These tabs are not being remembered for next time: {problem}."),
             ui,
-            10.,
+            crate::style::text::CAPTION,
         )
         .with_color(theme().usage_critical)
         .with_line_height_ratio(1.4)
@@ -1334,7 +1337,7 @@ fn empty_state(ui: FamilyId, query: &Query) -> Box<dyn Element> {
     };
 
     Container::new(
-        Text::new(line, ui, 12.)
+        Text::new(line, ui, crate::style::text::BODY)
             .with_color(theme().text_muted)
             .finish(),
     )

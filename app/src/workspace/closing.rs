@@ -140,7 +140,7 @@ const CARD_WIDTH: f32 = 320.;
 const CARD_LEAST_WIDTH: f32 = 240.;
 
 /// The card's corner radius, which is every menu's in this application.
-const CARD_RADIUS: f32 = 6.;
+const CARD_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// How many working panes the card names before it counts the rest.
 ///

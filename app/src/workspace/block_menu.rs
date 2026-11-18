@@ -87,7 +87,7 @@ use super::window_room::WindowRoom;
 const MENU_WIDTH: f32 = 260.;
 
 /// The popup's corner radius, which is every other popup's.
-const MENU_RADIUS: f32 = 6.;
+const MENU_RADIUS: f32 = crate::style::radius::MEDIUM;
 
 /// The least the menu is shortened to for a window shorter than it: a few
 /// entries' worth, under which a menu that scrolls is a menu nobody can read.
@@ -98,14 +98,14 @@ const MENU_LEAST_HEIGHT: f32 = 120.;
 /// Smaller than the label, for the reason the tab menu's is: the label is what
 /// somebody came to read and the chord is the answer to a question they have
 /// not asked yet.
-const CHORD_SIZE: f32 = 10.5;
+const CHORD_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The inset around every row. Dividers are full-bleed and are not inset,
 /// which is the one thing easiest to get backwards.
 const ROW_INSET: f32 = 12.;
 
 /// The size of a row's label.
-const LABEL_SIZE: f32 = 12.;
+const LABEL_SIZE: f32 = crate::style::text::BODY;
 
 /// The space above and below a row's label.
 const ROW_PADDING: f32 = 5.;

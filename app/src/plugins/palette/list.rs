@@ -166,7 +166,7 @@ const CHORDS_SHOWN: usize = 2;
 
 /// The radius of one key's cap: concentric inside the row's 6, inside the
 /// card's 10.
-const CAP_RADIUS: f32 = 4.;
+const CAP_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// Between two caps.
 const CAP_GAP: f32 = 6.;
@@ -180,7 +180,7 @@ const CLUSTER_GAP: f32 = 10.;
 /// The palette's secondary scale: the name, the keys, `not bound` and the
 /// headings are all one step under the title, so a row reads as a title with
 /// facts after it rather than as four columns of equals.
-const SECONDARY_SIZE: f32 = 10.5;
+const SECONDARY_SIZE: f32 = crate::style::text::CAPTION;
 
 /// The card, drawn over whatever is in the window.
 ///
@@ -228,7 +228,7 @@ pub(super) fn render(palette: &Palette, rows: &Rows, window_focused: bool) -> Bo
     if rows.is_empty() {
         column.add_child(
             Container::new(
-                Text::new(nothing(mode), fonts.ui, 12.)
+                Text::new(nothing(mode), fonts.ui, crate::style::text::BODY)
                     .with_color(theme().text_muted)
                     .finish(),
             )
@@ -284,7 +284,9 @@ pub(super) fn render(palette: &Palette, rows: &Rows, window_focused: bool) -> Bo
             Container::new(column.finish())
                 .with_background_color(theme().surface)
                 .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    crate::style::radius::LARGE,
+                )))
                 .with_uniform_padding(PADDING)
                 .finish(),
         )
@@ -369,7 +371,9 @@ fn command(
 
             Container::new(line)
                 .with_background_color(background)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    crate::style::radius::MEDIUM,
+                )))
                 .with_padding(Padding {
                     top: 7.,
                     bottom: 7.,
@@ -495,7 +499,7 @@ fn titled(entry: &Entry, ui: FamilyId) -> Box<dyn Element> {
     // centres the line in it, without changing how every other row in the
     // window lays out its flexible children.
     let title = Align::new(
-        Text::new(entry.title.clone(), ui, 12.)
+        Text::new(entry.title.clone(), ui, crate::style::text::BODY)
             .with_color(theme().text_primary)
             .with_ellipsis(Cut::End)
             .finish(),
