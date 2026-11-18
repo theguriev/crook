@@ -9197,12 +9197,23 @@ fn wait_for_the_locks_to_come_off(harness: &mut Harness) {
 /// scratch comes back with the harness so that it outlives the menu. `None`
 /// where there is no git to make one with.
 fn menu_over_checkout(branch: &str) -> Option<(Scratch, Harness)> {
+    menu_over_checkout_at(branch, &["checkout"])
+}
+
+/// [`menu_over_checkout`], with the checkout at `folders` under the scratch
+/// directory rather than at `checkout`: for a test about how its path is
+/// written.
+fn menu_over_checkout_at(branch: &str, folders: &[&str]) -> Option<(Scratch, Harness)> {
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
         return None;
     };
-    let checkout = scratch.path().join("checkout");
+    let checkout = folders
+        .iter()
+        .fold(scratch.path().to_path_buf(), |path, folder| {
+            path.join(folder)
+        });
     let added = crate::process::command("git")
         .args(["worktree", "add", "--quiet", "-b", branch])
         .arg(&checkout)
@@ -52812,4 +52823,120 @@ mod tooltips {
     fn scene_bounds() -> RectF {
         RectF::new(Vector2F::zero(), WINDOW)
     }
+}
+
+#[test]
+fn a_checkout_in_the_store_is_written_from_the_store_s_own_folder() {
+    // Written out whole, every checkout Crook made began with the same
+    // `~/.local/share/crook/worktrees/<repository>/`, and the row cut it
+    // from the start: `…l/share/crook/worktrees/crook/breathing-disc`, the
+    // store's name in pieces and the checkout's after it. Inside the store
+    // the line starts at the store's folder now.
+    let home = Path::new("/home/me");
+    let store = home
+        .join(".local")
+        .join("share")
+        .join("crook")
+        .join("worktrees");
+    let checkout = store.join("crook").join("breathing-disc");
+
+    assert_eq!(
+        super::tab_menu::checkout_place(&checkout, Some(&store), Some(home)),
+        Path::new("worktrees")
+            .join("crook")
+            .join("breathing-disc")
+            .to_string_lossy()
+    );
+}
+
+#[test]
+fn a_checkout_outside_the_store_is_written_with_the_home_directory_as_tilde() {
+    let home = Path::new("/home/me");
+    let store = home
+        .join(".local")
+        .join("share")
+        .join("crook")
+        .join("worktrees");
+    let main = home.join("Work").join("crook");
+
+    assert_eq!(
+        super::tab_menu::checkout_place(&main, Some(&store), Some(home)),
+        crate::git::user_friendly_path(&main, Some(home)),
+    );
+    assert!(
+        super::tab_menu::checkout_place(&main, Some(&store), Some(home)).starts_with('~'),
+        "the home directory was not written as ~"
+    );
+    // No store known, and the store itself rather than a checkout in it:
+    // both are any other directory.
+    assert_eq!(
+        super::tab_menu::checkout_place(&store, Some(&store), Some(home)),
+        crate::git::user_friendly_path(&store, Some(home)),
+    );
+    let in_store = store.join("crook").join("feat");
+    assert_eq!(
+        super::tab_menu::checkout_place(&in_store, None, Some(home)),
+        crate::git::user_friendly_path(&in_store, Some(home)),
+    );
+}
+
+#[test]
+fn a_place_is_cut_before_its_last_directory_with_the_separator_on_the_directory() {
+    let separator = std::path::MAIN_SEPARATOR;
+    let place = format!("worktrees{separator}crook{separator}breathing-disc");
+    assert_eq!(
+        super::tab_menu::place_parts(&place),
+        (
+            format!("worktrees{separator}crook").as_str(),
+            format!("{separator}breathing-disc").as_str()
+        )
+    );
+    assert_eq!(super::tab_menu::place_parts("~"), ("", "~"));
+    let root = format!("{separator}srv");
+    assert_eq!(super::tab_menu::place_parts(&root), ("", root.as_str()));
+}
+
+#[test]
+fn a_checkout_s_path_too_long_for_its_row_keeps_its_start_and_its_last_directory() {
+    // The line under a row was cut from its start, so a long path kept
+    // the last few folders and lost where it was. Cut in the middle now:
+    // the start says which tree, the last directory which checkout.
+    let branch = "feat/middle";
+    let Some((scratch, mut harness)) = menu_over_checkout_at(
+        branch,
+        &[
+            "a-folder-named-long-enough-to-crowd-the-row",
+            "and-another-one-after-it",
+            "the-checkout",
+        ],
+    ) else {
+        return;
+    };
+
+    let scene = harness.frame();
+    let menu = worktree_menu_box(&scene).expect("the menu is not up");
+    let lines = text_lines(&scene, |position| menu.contains_point(position));
+    let path = lines
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .find(|text| text.ends_with("/the-checkout") || text.ends_with("\\the-checkout"))
+        .unwrap_or_else(|| panic!("no line ends in the checkout's directory: {lines:?}"));
+    assert!(path.contains('…'), "{path:?} was not cut at all");
+    let mut home = None;
+    harness.workspace_update(|workspace, _| home = workspace.home().map(Path::to_path_buf));
+    // Either spelling of the scratch directory, with its separators made
+    // one: git prints a checkout's path with forward slashes on Windows,
+    // where the temporary directory has back slashes and is under the home
+    // directory only in the second spelling.
+    let same_separators = |text: &str| text.replace('\\', "/");
+    let wholes = [
+        crate::git::user_friendly_path(scratch.path(), home.as_deref()),
+        scratch.path().display().to_string(),
+    ]
+    .map(|whole| same_separators(&whole));
+    let start = same_separators(path.split('…').next().unwrap_or_default());
+    assert!(
+        !start.is_empty() && wholes.iter().any(|whole| whole.starts_with(&start)),
+        "{path:?} does not start where the path does, {wholes:?}"
+    );
 }
