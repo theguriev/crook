@@ -53341,6 +53341,24 @@ mod settings_prose {
     }
 
     #[test]
+    fn prose_longer_than_the_fold_that_fits_in_two_lines_is_not_folded() {
+        // The note under "Light / dark" is longer than `FOLD_AT` but a note
+        // runs the page's full measure, where it takes two lines: folding it
+        // would hide a line to save none. Counting characters folded it.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let scene = harness.frame();
+        assert!(
+            says(
+                &scene,
+                "The pair is remembered whether or not the switch is on."
+            ),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
     fn an_open_fold_stays_open_on_another_page_and_back() {
         let mut harness = shell("tab key");
         key(&mut harness, "down");

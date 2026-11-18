@@ -12,12 +12,14 @@
 //! a description keeps the whole sentences that fit in about two lines, and
 //! the rest waits behind an inline "More" that opens it in place.
 //!
-//! The decision is made on the text rather than on its layout. Whether a
-//! paragraph wraps onto a third line is known only once it has been laid out,
-//! which is after the element that would draw the button has been built, and
-//! a button that appeared and vanished as the window was resized would move
-//! the rows under it. [`FOLD_AT`] is two lines at the page's own measure,
-//! which is the width almost every page is read at.
+//! Whether to fold is decided by the layout, and where to fold by the text.
+//! A paragraph is folded only when it actually wraps onto a third line at the
+//! width it is given — a count of characters folded 177 that fitted in two
+//! and left 172 that took three, because where a line breaks depends on the
+//! words — so [`Fold`] lays the whole paragraph out first and keeps it when
+//! it fits. What stays visible when it does not is whole sentences up to
+//! [`FOLD_AT`] characters, which is a choice about the words rather than
+//! about the width.
 //!
 //! # Why it does not lose a search
 //!
@@ -43,9 +45,14 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use crookui_core::AppContext;
+use crookui_core::element::SizeConstraint;
 use crookui_core::elements::MouseStateHandle;
+use crookui_core::event::DispatchedEvent;
 use crookui_core::fonts::{Properties, Weight};
+use crookui_core::geometry::{Point, Vector2F};
 use crookui_core::prelude::*;
+use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use super::focus::{self, Keys, Stop};
 use super::search::Query;
@@ -53,12 +60,13 @@ use super::widgets::DESCRIPTION_SIZE;
 use crate::theme::theme;
 use crate::workspace::action::{SettingsAction, WorkspaceAction};
 
-/// How many characters of prose are shown before the rest is folded away.
+/// How many characters of a folded paragraph stay in sight, in whole
+/// sentences, and the length under which a paragraph is never folded at all.
 ///
-/// Two lines of a description at the page's measure: the page is 560 wide, a
-/// description stops 96 short of its edge, and the interface face at 11px
-/// advances about 5.4 a character — 86 to the line, so 170 is two lines with
-/// a word's slack for where they break.
+/// About two lines of a description at the page's own measure: the page is
+/// 560 wide, a description stops 96 short of its edge, and the interface face
+/// at 11px advances about 5.4 a character — 86 to the line. Whether a longer
+/// paragraph is folded is the layout's call, not this number's: see [`Fold`].
 pub(crate) const FOLD_AT: usize = 170;
 
 /// A piece of prose split where it folds: what is always shown, and what
@@ -188,26 +196,109 @@ pub(crate) fn folded(
     ui: crookui_core::fonts::FamilyId,
     draw: impl Fn(String) -> Box<dyn Element>,
 ) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
-
     READING.with_borrow(|reading| {
-        let Some(reading) = reading else {
-            column.add_child(draw(text.to_owned()));
-            return;
+        let (Some(reading), (shown, Some(hidden))) = (reading, fold(text)) else {
+            return draw(text.to_owned());
         };
-        let (shown, hidden) = fold(text);
         let id = id_of(text);
-        let found = hidden.is_some_and(|hidden| reading.query.finds_in(hidden));
-        let open = hidden.is_none() || found || reading.prose.open.borrow().contains(&id);
-
-        column.add_child(draw(if open { text } else { shown }.to_owned()));
-        if hidden.is_some() && !found {
-            column.add_child(more(open, id, reading.prose.control(id), ui));
+        // A query that found the row by the folded words holds it open, and
+        // with nothing to press: a "Less" there could not close it.
+        if reading.query.finds_in(hidden) {
+            return draw(text.to_owned());
         }
-    });
-    column.finish()
+        let open = reading.prose.open.borrow().contains(&id);
+        let state = reading.prose.control(id);
+        let with_button = |words: &str| {
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(draw(words.to_owned()))
+                .with_child(more(open, id, state.clone(), ui))
+                .finish()
+        };
+        Box::new(Fold {
+            probe: draw(text.to_owned()),
+            line: draw("M".to_owned()),
+            plain: draw(text.to_owned()),
+            folded: with_button(if open { text } else { shown }),
+            chosen: false,
+            size: None,
+            origin: None,
+        })
+    })
+}
+
+/// Prose that is folded only if, at the width it is laid out at, it runs past
+/// two lines.
+///
+/// Two drawings of the same words are laid out to measure — the whole text,
+/// and one line of it — and neither is painted; then whichever of the plain
+/// paragraph and the folded one (with its More, or its Less once opened) is
+/// right is laid out for real. Measuring with copies rather than the drawings
+/// that are shown keeps the More's stop out of the keyboard's list on a frame
+/// where it is not drawn: a stop is written down when it is laid out.
+struct Fold {
+    /// The whole text, laid out only to be measured.
+    probe: Box<dyn Element>,
+    /// One line in the same face, laid out only to be measured.
+    line: Box<dyn Element>,
+    /// The whole text with no button: what a paragraph that fits is.
+    plain: Box<dyn Element>,
+    /// The text cut at the fold with its More, or whole with its Less.
+    folded: Box<dyn Element>,
+    /// Whether the last layout chose `folded`.
+    chosen: bool,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl Fold {
+    fn shown(&mut self) -> &mut Box<dyn Element> {
+        match self.chosen {
+            true => &mut self.folded,
+            false => &mut self.plain,
+        }
+    }
+}
+
+impl Element for Fold {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let whole = self.probe.layout(constraint, ctx, app).y();
+        let line = self.line.layout(constraint, ctx, app).y();
+        // Two and a half lines rather than two, so a paragraph whose box is a
+        // fraction taller than two of its lines is not taken for three.
+        self.chosen = whole > line * 2.5;
+        let size = self.shown().layout(constraint, ctx, app);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.shown().paint(origin, ctx, app);
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.shown().dispatch_event(event, ctx, app)
+    }
 }
 
 /// The inline button that opens a fold, or closes it.
