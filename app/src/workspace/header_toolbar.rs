@@ -72,7 +72,7 @@ const FOLDED_TABS_BUTTON_SIZE: f32 = 20.;
 const FOLDED_TABS_ICON_SIZE: f32 = 14.;
 
 /// Its corners, the chip's.
-const FOLDED_TABS_BUTTON_RADIUS: f32 = 5.;
+const FOLDED_TABS_BUTTON_RADIUS: f32 = crate::style::radius::SMALL;
 
 /// The gap between it and whatever is pinned to the left of the row.
 const FOLDED_TABS_BUTTON_GAP: f32 = 6.;
