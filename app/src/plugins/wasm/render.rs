@@ -339,6 +339,7 @@ impl Placement {
             offset: vec2f(0., offset),
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         }
     }
 }
@@ -892,6 +893,7 @@ fn explained(
                 offset: vec2f(0., -PANEL_OFFSET),
                 keep_on_screen: true,
                 keep_clear_of_parent: true,
+                flip_to_fit: false,
             },
         );
         stack.finish()

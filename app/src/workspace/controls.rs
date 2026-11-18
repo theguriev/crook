@@ -181,6 +181,7 @@ pub(super) fn options_ground(workspace: &Workspace, list: Box<dyn Element>) -> B
                 offset: Vector2F::zero(),
                 keep_on_screen: true,
                 keep_clear_of_parent: false,
+                flip_to_fit: false,
             },
         );
     }

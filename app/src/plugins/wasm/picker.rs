@@ -789,6 +789,7 @@ pub(super) fn menued(
             offset: vec2f(0., MENU_OFFSET),
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
     );
     stack.finish()

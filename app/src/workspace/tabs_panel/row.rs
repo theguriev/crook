@@ -336,7 +336,9 @@ pub(super) fn render(
     if menu_is_open {
         // Below the row and inside the panel. Beside it — where the card goes
         // — would put a 260px menu over the body, which is the same argument
-        // that right-aligns the list's own options menu in this column.
+        // that right-aligns the list's own options menu in this column. Above
+        // it for a row too near the foot of the window for the menu to fit
+        // under, rather than slid up over the row it was opened on.
         let mut stack = Stack::new().with_child(element);
         stack.add_anchored_overlay_child(
             Dismiss::new(super::super::tab_context_menu::render(workspace, app))
@@ -345,7 +347,10 @@ pub(super) fn render(
                     ctx.dispatch_typed_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
                 })
                 .finish(),
-            AnchorTo::below(vec2f(0., 4.)),
+            AnchorTo {
+                flip_to_fit: true,
+                ..AnchorTo::below(vec2f(0., 4.))
+            },
         );
         return stack.finish();
     }
@@ -398,6 +403,7 @@ pub(super) fn render(
             // leaves — see `WindowRoom` — and keeps this for a window with
             // less room than the card's least width.
             keep_clear_of_parent: true,
+            flip_to_fit: false,
         },
     );
     stack.finish()

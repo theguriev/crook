@@ -15407,6 +15407,7 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
     offset: Vector2F::zero(),
     keep_on_screen: false,
     keep_clear_of_parent: false,
+    flip_to_fit: false,
 };
 
 /// Where Crook keeps the checkouts it makes.

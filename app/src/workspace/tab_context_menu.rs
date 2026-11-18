@@ -768,6 +768,7 @@ const BESIDE: AnchorTo = AnchorTo {
     offset: vec2f(-2., 0.),
     keep_on_screen: true,
     keep_clear_of_parent: false,
+    flip_to_fit: false,
 };
 
 /// The hairline between two groups of entries.

@@ -647,6 +647,7 @@ fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
                 offset: vec2f(-(NOTE_WIDTH - INFO_DOT_SIZE) / 2., -4.),
                 keep_on_screen: true,
                 keep_clear_of_parent: false,
+                flip_to_fit: false,
             },
         );
         stack.finish()

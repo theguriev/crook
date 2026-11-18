@@ -810,6 +810,7 @@ fn blocks(
             offset: Vector2F::zero(),
             keep_on_screen: false,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
     );
     let list = stack.finish();
@@ -878,6 +879,7 @@ fn float_find_bar(output: Box<dyn Element>, bar: Box<dyn Element>) -> Box<dyn El
             offset: vec2f(-FIND_BAR_INSET, FIND_BAR_INSET),
             keep_on_screen: true,
             keep_clear_of_parent: false,
+            flip_to_fit: false,
         },
     );
     stack.finish()
