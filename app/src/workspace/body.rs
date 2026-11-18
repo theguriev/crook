@@ -768,6 +768,7 @@ fn blocks(
             workspace.tip("Copy block", Some("crook/window/copy-block")),
             workspace.tip("More actions", Some("crook/window/open-block-menu")),
         ))
+        .with_captions(workspace.fonts().ui)
         .with_find(matches.clone(), current)
         .with_filter(
             filtered
