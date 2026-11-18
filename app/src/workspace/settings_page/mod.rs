@@ -67,6 +67,7 @@
 //! anyone who wants to open it themselves.
 
 pub(crate) mod focus;
+pub(crate) mod prose;
 pub(crate) mod search;
 pub(crate) mod widgets;
 
@@ -179,6 +180,11 @@ pub(crate) struct SettingsState {
     /// keyboard of whichever section is showing, and it can only reach what
     /// it holds.
     sections: std::cell::RefCell<HashMap<String, focus::Focus>>,
+    /// Which folded paragraphs are open.
+    ///
+    /// Shared with the widgets while a page is built, which is why it is
+    /// behind an `Rc`: see [`prose`].
+    pub(crate) prose: std::rc::Rc<prose::Prose>,
 }
 
 impl SettingsState {
@@ -242,6 +248,7 @@ impl SettingsState {
         for state in self.controls.borrow().values() {
             state.lock().reset_interaction_state();
         }
+        self.prose.forget_hover_state();
     }
 }
 
@@ -286,13 +293,22 @@ pub(crate) fn render(
     // each page holds, and it cannot say that about a page it has not built.
     // A page that draws itself has no rows to count: it is found by its title
     // or not at all, which is one, or none.
+    //
+    // Built while the page's folds are where its widgets can see them, so a
+    // long description is folded and one the query found in is open: see
+    // [`prose`].
+    let build = |id: PageId| {
+        prose::reading(state.prose.clone(), &query, || {
+            host.build_settings_page(id, workspace, app)
+        })
+    };
     let counts: Vec<(PageId, usize)> = pages
         .iter()
         .map(|(id, title)| {
             if query.is_empty() {
                 return (*id, 0);
             }
-            let found = match host.build_settings_page(*id, workspace, app) {
+            let found = match build(*id) {
                 Some(categories) => matches_in(&categories, &query, title),
                 None => 0,
             };
@@ -301,7 +317,7 @@ pub(crate) fn render(
         .collect();
 
     let showing = showing(selected, &counts, &query);
-    let body = host.build_settings_page(showing, workspace, app);
+    let body = build(showing);
 
     (
         rail(workspace, &pages, showing, &counts, &query),

@@ -1001,6 +1001,12 @@ pub enum SettingsAction {
     UnbindCommand(ActionId),
     /// Put this command back to the chord this build ships with.
     ResetBinding(ActionId),
+    /// Open a folded paragraph on the page, or close an open one.
+    ///
+    /// By a hash of its words, for the reason [`Self::FocusField`] carries an
+    /// index: this enum is `Copy`. See
+    /// [`settings_page::prose`](crate::workspace::settings_page::prose).
+    ToggleProse(u64),
 }
 
 /// What the options menu writes.

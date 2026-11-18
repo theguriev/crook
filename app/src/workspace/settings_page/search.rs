@@ -107,6 +107,15 @@ impl Query {
                 || context.iter().any(|word| contains(word, term))
         })
     }
+
+    /// Whether any of the query's terms is in `text`.
+    ///
+    /// Any rather than every, unlike [`Self::matches`]: this asks whether a
+    /// folded paragraph holds a reason the row was found, and one term that
+    /// is only in the hidden part is reason enough to open it.
+    pub(crate) fn finds_in(&self, text: &str) -> bool {
+        self.terms.iter().any(|term| contains(text, term))
+    }
 }
 
 /// Whether `haystack` contains `term`, which is already lowercase.
