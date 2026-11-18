@@ -5,6 +5,22 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.45
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.44...v0.1.45)
+
+### Features
+
+- **tabs:** Search every emoji by name in the tab emoji field ([#583](https://github.com/theguriev/crook/pull/583))
+
+### Fixes
+
+- **closing:** Let the close question take its keys at once ([#584](https://github.com/theguriev/crook/pull/584))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.44
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.43...v0.1.44)
