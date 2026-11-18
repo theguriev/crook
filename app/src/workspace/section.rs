@@ -47,8 +47,9 @@
 //!
 //! What is left goes to the right, where empty room reads as room.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::FamilyId;
+use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::theme::theme;
@@ -315,6 +316,136 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
     // chosen one while the keyboard is on the list. The gap under the row is
     // inside it, so the ring is drawn on the row's edge, the gap and all.
     Stop::list_row(&stop, command, selected, ROW_RADIUS, row)
+}
+
+/// A row of the list that is pressed rather than chosen: a fold that opens
+/// and shuts part of the list, or a link to another section.
+///
+/// Drawn as a row — the same inset, the same fill under the pointer — so
+/// that it is plainly something to press, and it is one of the rail's rows
+/// to the keyboard, but one an arrow stands on without pressing. See
+/// [`Stop::list_press`].
+pub(crate) struct PressRow {
+    /// What it says.
+    pub(crate) label: String,
+    /// The mark before it: the fold's chevron, the link's icon.
+    pub(crate) icon: Lucide,
+    /// A word after the label, muted: how many rows a fold holds.
+    pub(crate) trailing: Option<String>,
+    /// Whether the label is a heading over what follows rather than a thing
+    /// to do — set in the heading's muted semibold, so the fold reads as the
+    /// name of the group it opens and the link as a row of its own.
+    pub(crate) heading: bool,
+    /// Its own hover state.
+    pub(crate) state: MouseStateHandle,
+    /// What pressing it does, with the pointer or with Enter.
+    pub(crate) press: Option<WorkspaceAction>,
+}
+
+/// The size of the mark on a [`PressRow`]: the tab list's fold chevron's,
+/// one step under a row's picture so it reads as a mark rather than a face.
+const PRESS_ICON_SIZE: f32 = 14.;
+
+/// One [`PressRow`], drawn.
+pub(crate) fn press_row(row: PressRow, ui: FamilyId) -> Box<dyn Element> {
+    let PressRow {
+        label,
+        icon,
+        trailing,
+        heading,
+        state,
+        press,
+    } = row;
+
+    let stop = state.clone();
+    let hoverable = Hoverable::new(state, move |mouse| {
+        let hovered = mouse.is_hovered();
+        let background = if hovered {
+            theme().overlay_1
+        } else {
+            Color::TRANSPARENT
+        };
+        let ink = if heading && !hovered {
+            theme().text_muted
+        } else {
+            theme().text_primary
+        };
+
+        let mut line = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Container::new(Icon::new(icon, PRESS_ICON_SIZE).with_color(ink).finish())
+                    .with_margin_right(LEADING_GAP)
+                    .finish(),
+            );
+        let text = Text::new(label, ui, widgets::LABEL_SIZE)
+            .with_color(ink)
+            .with_ellipsis(Cut::End);
+        let text = match heading {
+            true => text.with_style(Properties {
+                weight: Weight::Semibold,
+                ..Properties::default()
+            }),
+            false => text,
+        };
+        line.add_child(Expanded::new(1., text.finish()).finish());
+        if let Some(trailing) = trailing {
+            line.add_child(
+                Container::new(
+                    Text::new(trailing, ui, widgets::DESCRIPTION_SIZE)
+                        .with_color(theme().text_muted)
+                        .finish(),
+                )
+                .with_margin_left(LEADING_GAP)
+                .finish(),
+            );
+        }
+
+        Container::new(line.finish())
+            .with_padding(ROW_PADDING)
+            .with_background_color(background)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_RADIUS)))
+            .with_margin_bottom(ROW_GAP)
+            .finish()
+    });
+
+    let row = match press {
+        Some(press) => hoverable
+            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(press))
+            .finish(),
+        None => hoverable.finish(),
+    };
+    Stop::list_press(&stop, press, ROW_RADIUS, row)
+}
+
+/// A line of muted prose in the list, inset to where a row's label starts:
+/// what an empty group says in place of its rows.
+pub(crate) fn list_note(text: &str, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(text.to_owned(), ui, widgets::DESCRIPTION_SIZE)
+            .with_color(theme().text_muted)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_padding(ROW_PADDING)
+    .finish()
+}
+
+/// The name over a group of the list's rows.
+///
+/// The settings' category heading, inset to the rows' own padding so that
+/// it starts where their labels' leading marks do, with a little more air
+/// above it than below so it reads as belonging to what follows.
+pub(crate) fn list_heading(title: &str, first: bool, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(widgets::heading(title, widgets::Tone::Plain, ui))
+        .with_padding(Padding {
+            top: if first { 2. } else { 12. },
+            bottom: 6.,
+            left: ROW_PADDING.left,
+            right: ROW_PADDING.right,
+        })
+        .finish()
 }
 
 /// The window half: a title that stays put, and the page scrolling under it.

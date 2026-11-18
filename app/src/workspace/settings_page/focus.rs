@@ -282,6 +282,10 @@ struct Row {
     id: StopId,
     /// What choosing it does: the same action a click on it sends.
     choose: Option<WorkspaceAction>,
+    /// What pressing it does, for a row that is pressed rather than chosen:
+    /// a fold opened or shut, a link to another section. See
+    /// [`Stop::list_press`].
+    press: Option<WorkspaceAction>,
     /// Whether it is the row the page beside the list is about.
     selected: bool,
     /// Where it was painted, from the top of the list's content.
@@ -332,6 +336,16 @@ struct Inner {
     /// it has: a second Down before the frame goes one further than the
     /// first, rather than to the same row again.
     chose: Option<usize>,
+    /// The row that is pressed rather than chosen which the keyboard is
+    /// standing on, if it is on one.
+    ///
+    /// A plugin row is where the keyboard is by being the row the card is
+    /// about, so the selection is the keyboard's place and needs no second
+    /// record. A fold or a link has no card: arriving on it must not press
+    /// it — the fold would open under an arrow passing over it — so the
+    /// keyboard's place on one is written down here, and kept from frame to
+    /// frame until an arrow moves it off or the keyboard leaves the list.
+    resting: Option<StopId>,
     /// Where the list's content began on the last paint, in window
     /// coordinates.
     list_top: f32,
@@ -345,6 +359,18 @@ struct Inner {
 }
 
 impl Inner {
+    /// Where the keyboard is in the list: the row chosen since the last
+    /// layout, else the pressed row it stands on, else the row the page is
+    /// about — and, in a list where no row is that, the first, so a list of
+    /// nothing but a fold and a link still has somewhere for the ring to be.
+    fn cursor(&self) -> Option<usize> {
+        let at = |id: StopId| self.rows.iter().position(|row| row.id == id);
+        self.chose
+            .or_else(|| self.resting.and_then(at))
+            .or_else(|| self.rows.iter().position(|row| row.selected))
+            .or_else(|| (!self.rows.is_empty()).then_some(0))
+    }
+
     /// Settles which control the keyboard is on against the list the last
     /// layout recorded: the one it was on if that is still there, or
     /// whatever has taken its place.
@@ -390,6 +416,7 @@ impl Focus {
         inner.place = place;
         inner.on = None;
         inner.index = 0;
+        inner.resting = None;
     }
 
     /// Puts the keyboard on the first control the page draws, which is
@@ -411,6 +438,7 @@ impl Focus {
         inner.place = Place::Control;
         inner.on = None;
         inner.index = at;
+        inner.resting = None;
         inner.resolve();
     }
 
@@ -461,13 +489,6 @@ impl Focus {
         inner.stale = false;
     }
 
-    /// Whether the ring around the rail is drawn: the keyboard is on it and
-    /// the page holds the keyboard.
-    pub(crate) fn rail_is_lit(&self) -> bool {
-        let inner = self.0.borrow();
-        inner.place == Place::Rail && inner.holds_keys
-    }
-
     /// Whether the last frame's list had a row to put the keyboard on.
     pub(crate) fn has_rows(&self) -> bool {
         !self.0.borrow().rows.is_empty()
@@ -480,12 +501,13 @@ impl Focus {
     /// From the row chosen since the last frame when there is one, so two
     /// Downs before a frame go two rows; otherwise from the row the page is
     /// about.
+    ///
+    /// Landing on a row that is pressed rather than chosen hands back
+    /// nothing: the keyboard stands on it, and Enter is what presses it.
     pub(crate) fn choose(&self, key: Key) -> Option<WorkspaceAction> {
         let mut inner = self.0.borrow_mut();
         let last = inner.rows.len().checked_sub(1)?;
-        let at = inner
-            .chose
-            .or_else(|| inner.rows.iter().position(|row| row.selected));
+        let at = inner.cursor();
         let next = match (key, at) {
             (Key::Home, _) => 0,
             (Key::End, _) => last,
@@ -498,16 +520,30 @@ impl Focus {
             return None;
         }
         inner.chose = Some(next);
+        let row = &inner.rows[next];
+        if row.press.is_some() {
+            inner.resting = Some(row.id);
+            return None;
+        }
+        inner.resting = None;
         inner.rows[next].choose
+    }
+
+    /// What Enter does on the list: presses the row the keyboard stands on,
+    /// when that is a row that is pressed rather than chosen.
+    pub(crate) fn row_press(&self) -> Option<WorkspaceAction> {
+        let inner = self.0.borrow();
+        if inner.place != Place::Rail {
+            return None;
+        }
+        inner.rows.get(inner.cursor()?)?.press
     }
 
     /// Where the row the keyboard has chosen was painted, from the top of the
     /// list's content.
     fn box_of_row(&self) -> Option<(f32, f32)> {
         let inner = self.0.borrow();
-        let at = inner
-            .chose
-            .or_else(|| inner.rows.iter().position(|row| row.selected))?;
+        let at = inner.cursor()?;
         let row = inner.rows.get(at)?;
         Some((row.top?, row.height))
     }
@@ -709,7 +745,13 @@ impl Focus {
 
     /// Adds one row to it, in the order it was laid out — once, as a control
     /// is.
-    fn record_row(&self, id: StopId, choose: Option<WorkspaceAction>, selected: bool) {
+    fn record_row(
+        &self,
+        id: StopId,
+        choose: Option<WorkspaceAction>,
+        press: Option<WorkspaceAction>,
+        selected: bool,
+    ) {
         let mut inner = self.0.borrow_mut();
         if inner.rows.iter().any(|row| row.id == id) {
             return;
@@ -717,10 +759,23 @@ impl Focus {
         inner.rows.push(Row {
             id,
             choose,
+            press,
             selected,
             top: None,
             height: 0.,
         });
+    }
+
+    /// Whether the ring is on the row `id`: the keyboard is on the list and
+    /// that is where in it.
+    fn row_is_lit(&self, id: StopId) -> bool {
+        let inner = self.0.borrow();
+        inner.place == Place::Rail
+            && inner.holds_keys
+            && inner
+                .cursor()
+                .and_then(|at| inner.rows.get(at))
+                .is_some_and(|row| row.id == id)
     }
 
     /// Writes down where one row was painted.
@@ -900,6 +955,7 @@ enum Lit {
     Row {
         id: StopId,
         choose: Option<WorkspaceAction>,
+        press: Option<WorkspaceAction>,
         selected: bool,
     },
     /// Lit or not, and in nobody's list: what a surface that keeps its own
@@ -978,7 +1034,35 @@ impl Stop {
             Lit::Row {
                 id: StopId::of(state),
                 choose,
+                press: None,
                 selected,
+            },
+            Radius::Pixels(radius),
+            true,
+            child,
+        )
+    }
+
+    /// A row of the sidebar's list that is pressed rather than chosen — a
+    /// fold, a link to another section — known by `state`, rounded by
+    /// `radius`.
+    ///
+    /// The keyboard stands on it when an arrow lands there, without pressing
+    /// it, and Enter or Space presses it: a fold that opened as an arrow
+    /// passed over it would be a list that changed shape under the keys
+    /// walking it.
+    pub(crate) fn list_press(
+        state: &MouseStateHandle,
+        press: Option<WorkspaceAction>,
+        radius: f32,
+        child: Box<dyn Element>,
+    ) -> Box<dyn Element> {
+        Self::boxed(
+            Lit::Row {
+                id: StopId::of(state),
+                choose: None,
+                press,
+                selected: false,
             },
             Radius::Pixels(radius),
             true,
@@ -1018,10 +1102,11 @@ impl Element for Stop {
                 Lit::Row {
                     id,
                     choose,
+                    press,
                     selected,
                 },
                 Some((page, Region::List)),
-            ) => page.record_row(*id, *choose, *selected),
+            ) => page.record_row(*id, *choose, *press, *selected),
             _ => {}
         }
         self.size = Some(size);
@@ -1057,9 +1142,9 @@ impl Element for Stop {
                 }
                 on
             }
-            (Lit::Row { id, selected, .. }, Some((page, Region::List))) => {
+            (Lit::Row { id, .. }, Some((page, Region::List))) => {
                 page.painted_row(*id, origin.y(), size.y());
-                *selected && page.rail_is_lit()
+                page.row_is_lit(*id)
             }
             _ => false,
         };

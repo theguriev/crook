@@ -57,10 +57,44 @@ pub(super) fn matching(workspace: &Workspace) -> Vec<&'static Manifest> {
         .collect()
 }
 
+/// Whether anything has been typed into the field.
+pub(super) fn is_searching(workspace: &Workspace) -> bool {
+    let (_, input) = workspace.field(SECTION, FIELD);
+    !Query::new(input.editor().text()).is_empty()
+}
+
+/// What the list holds, in the two groups it is drawn in.
+///
+/// Installed first, because that is what a person opens this page to see:
+/// the plugins they chose, and whether each is running. The modules the
+/// binary is built from are eighteen rows of the same answer — on, built in —
+/// and listed first they pushed the one plugin somebody installed to the foot
+/// of the list, under everything they did not choose.
+pub(super) struct Groups<'a> {
+    /// The plugins that are not part of the binary, in the host's order.
+    pub(super) installed: &'a [&'static Manifest],
+    /// The ones that are, in the host's order.
+    pub(super) built_in: &'a [&'static Manifest],
+    /// Whether the built-in ones are drawn: the fold is open, or a search
+    /// is looking through them.
+    pub(super) open: bool,
+    /// Whether something has been typed into the field.
+    pub(super) searching: bool,
+}
+
+/// The heading over the plugins somebody installed.
+const INSTALLED: &str = "Installed";
+
+/// What the fold over the built-in plugins is called.
+const BUILT_IN: &str = "Built in";
+
+/// What the list says under [`INSTALLED`] when nothing is.
+const NOTHING_INSTALLED: &str = "Nothing installed yet. The Store lists plugins to add.";
+
 /// The list, with its field above it.
 pub(super) fn render(
     workspace: &Workspace,
-    matching: &[&'static Manifest],
+    groups: Groups<'_>,
     showing: Option<&PluginId>,
     state: &PluginsState,
 ) -> Box<dyn Element> {
@@ -88,7 +122,7 @@ pub(super) fn render(
     .with_edit(WorkspaceAction::Settings(SettingsAction::SearchEdited))
     .finish();
 
-    let list = if matching.is_empty() {
+    let list = if groups.installed.is_empty() && groups.built_in.is_empty() {
         // Inset to the row's own padding rather than to the list's, so the
         // line starts where a row's label would have.
         Container::new(
@@ -102,14 +136,42 @@ pub(super) fn render(
         let mut rows = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
-        for manifest in matching {
-            rows.add_child(row(
+        let plugin_row = |manifest: &&'static Manifest| {
+            row(
                 workspace,
                 manifest,
                 showing == Some(&manifest.id),
                 host.is_loaded(&manifest.id),
                 ui,
-            ));
+            )
+        };
+
+        // The heading, and the way to the Store when there is nothing under
+        // it. Left out of a search that found only built-in plugins: an
+        // "Installed" with nothing under it there would read as the search
+        // saying nothing is installed.
+        if !groups.installed.is_empty() || !groups.searching {
+            rows.add_child(section::list_heading(INSTALLED, true, ui));
+        }
+        if groups.installed.is_empty() && !groups.searching {
+            rows.add_child(section::list_note(NOTHING_INSTALLED, ui));
+            rows.add_child(store_link(workspace, ui));
+        }
+        rows.add_children(groups.installed.iter().map(plugin_row));
+
+        if !groups.built_in.is_empty() {
+            let count = groups.built_in.len().to_string();
+            // A search opens the group whatever the fold says, so the fold
+            // is drawn as the heading it then is, with nothing to press: a
+            // chevron that shut nothing while the field had text would be a
+            // control that did not work.
+            rows.add_child(match groups.searching {
+                true => section::list_heading(&format!("{BUILT_IN} \u{b7} {count}"), false, ui),
+                false => built_in_fold(workspace, groups.open, count, ui),
+            });
+            if groups.open {
+                rows.add_children(groups.built_in.iter().map(plugin_row));
+            }
         }
         rows.finish()
     };
@@ -151,6 +213,74 @@ pub(super) fn render(
         list,
         settings.scroll_named(LIST_SCROLL),
         footer,
+    )
+}
+
+/// The fold over the built-in plugins: a chevron, the group's name, and how
+/// many it holds.
+///
+/// Shut until somebody opens it, for as long as the window is open — see
+/// `PluginsState::built_in_open`. The count is there so the fold says what
+/// it holds without being opened: "18" is the answer to "is there anything
+/// under this", and it is the whole of what a shut group has to say.
+fn built_in_fold(
+    workspace: &Workspace,
+    open: bool,
+    count: String,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let press = workspace
+        .host()
+        .action(&about("fold"))
+        .map(WorkspaceAction::Run);
+    // Above the fold, not inside it: a gap between the last installed row
+    // and the fold says the two are different groups, which a chevron
+    // pressed against the row above it does not.
+    Container::new(section::press_row(
+        section::PressRow {
+            label: BUILT_IN.to_owned(),
+            icon: if open {
+                Lucide::ChevronDown
+            } else {
+                Lucide::ChevronRight
+            },
+            trailing: Some(count),
+            heading: true,
+            state: workspace.settings_page().control(named("plugins.built-in")),
+            press,
+        },
+        ui,
+    ))
+    .with_margin_top(FOLD_GAP)
+    .finish()
+}
+
+/// The air above the fold, which is what sets the built-in group apart from
+/// the installed one above it.
+const FOLD_GAP: f32 = 8.;
+
+/// The row that takes a person with nothing installed to the Store.
+///
+/// The section switch the sidebar's own Store button sends, so arriving there
+/// is arriving the way the button would. Nothing when the Store has been
+/// switched off: a link to a section that is not there would be a row that
+/// did nothing, and the sentence above it still says where plugins come from.
+fn store_link(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
+    let Some(store) = workspace.host().sidebar_section_id(store::SECTION) else {
+        return Empty::new().finish();
+    };
+    section::press_row(
+        section::PressRow {
+            label: "Open the Store".to_owned(),
+            icon: Lucide::Store,
+            trailing: None,
+            heading: false,
+            state: workspace
+                .settings_page()
+                .control(named("plugins.open-store")),
+            press: Some(WorkspaceAction::ShowSection(Some(store))),
+        },
+        ui,
     )
 }
 
