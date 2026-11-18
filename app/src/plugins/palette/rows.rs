@@ -248,10 +248,23 @@ pub(super) struct Chord {
 /// and a key the program in the pane eats is not something a keybindings file
 /// can reach.
 pub(super) struct Entry {
-    /// The name, printed on the right of the row: the only way a person finds
-    /// out what to write in their keybindings file, and what tells two
-    /// plugins' "Refresh" apart.
+    /// The name, printed on the right of the row when the row is selected or
+    /// was found by it: the only way a person finds out what to write in their
+    /// keybindings file, and what tells two plugins' "Refresh" apart.
     pub(super) action: Option<ActionName>,
+    /// Whether the query found this row by its action name rather than by
+    /// anything else the row says.
+    ///
+    /// The name is what the row is *for* only on the row being run and on a
+    /// row that is in the list because of it. Printed down the side of every
+    /// row it was forty copies of `crook/window/` beside forty titles that
+    /// already said what each one does — the same thing twice on every line,
+    /// in a column nobody reads until they are about to write a file. So it is
+    /// shown on the selected row, which is the one a person is about to act
+    /// on, and on a row a term reached through the name alone: `split-left`
+    /// matches no title, and a row standing under that query with nothing on
+    /// it saying why would look like a wrong answer.
+    pub(super) id_matched: bool,
     /// What it is called. For a row under [`OTHER_BINDINGS`] there is no human
     /// name, so this is the action name itself and the row prints no
     /// right-hand column — the same string in both columns is a stutter, not a
@@ -594,6 +607,7 @@ fn runnable<'a>(
             owner,
             Entry {
                 action: Some(action.clone()),
+                id_matched: found_by_name(title, action, terms),
                 title: title.clone(),
                 detail: None,
                 chords,
@@ -689,6 +703,7 @@ fn tabs(workspace: &Workspace, app: &AppContext, needle: &str, goto: Goto) -> Ve
                     // No name column: no keybindings file can reach one tab,
                     // so there is nothing here for a person to write down.
                     action: None,
+                    id_matched: false,
                     title: called(tab),
                     detail: where_it_is(workspace, tab),
                     chords: Vec::new(),
@@ -789,6 +804,7 @@ fn settings(
                 rows.push(Row::Command(
                     Entry {
                         action: None,
+                        id_matched: false,
                         title: label.clone(),
                         detail: Some(format!("{title} \u{b7} {}", category.title)),
                         chords: Vec::new(),
@@ -834,6 +850,23 @@ fn command_matches(
                 && (NOT_BOUND.split_whitespace().any(|word| word == *term)
                     || *term == "unbound"))
     })
+}
+
+/// Whether some term of the query found this command by its action name and
+/// not by its title.
+///
+/// The question [`Entry::id_matched`] answers. A term the title holds too says
+/// nothing about the name — `split` is in `Split to the left` and in
+/// `crook/window/split-left` alike, and the title is already the reason that
+/// row is there — so only a term the title does *not* hold counts: `split-left`,
+/// `crook/win`. A term that found the row by its owner's name alone counts
+/// only where the action's name holds it too, which for the window's own
+/// commands — `crook/window/…` — it does.
+fn found_by_name(title: &str, action: &ActionName, terms: &[&str]) -> bool {
+    let title = title.to_lowercase();
+    terms
+        .iter()
+        .any(|term| !title.contains(term) && action.as_str().contains(term))
 }
 
 /// The commands, flat and by title: no headings, and the launcher's ordering
@@ -957,6 +990,9 @@ fn other_bindings(
 
         let entry = Entry {
             action: Some(name.clone()),
+            // The name is the title here, so there is no second column for
+            // it to appear in whatever found the row.
+            id_matched: false,
             title: name.to_string(),
             detail: None,
             chords,
@@ -1006,6 +1042,7 @@ fn in_a_pane(terms: &[&str]) -> Vec<Row> {
         .map(|key| {
             Row::Fact(Entry {
                 action: None,
+                id_matched: false,
                 title: key.label.to_owned(),
                 detail: None,
                 chords: parts(key.keys()),

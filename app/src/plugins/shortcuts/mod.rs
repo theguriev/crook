@@ -46,6 +46,7 @@ use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 
 use crate::keybindings::{self, Recording, Resolution, Source};
 use crate::plugin::{BuildError, Host, Plugin};
+use crate::plugins::settings::SETTINGS_SECTION;
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category, Entry};
 use crate::workspace::settings_page::{SettingsState, keyed};
@@ -195,12 +196,19 @@ fn binding_row(
     let editing =
         |action: SettingsAction| -> Option<WorkspaceAction> { editable.then_some(action.into()) };
 
+    // At rest the line under the label is where the binding came from, and
+    // nothing at all for a command nobody bound: the chord beside it already
+    // says `not bound`. The action name is the line's other half, and it is
+    // drawn only where it is the thing being read — see `found_by_name`.
+    let source = keybindings.source_of(command).map(|source| source.label());
     let description = match recording {
-        Some(recording) => recorded(workspace, recording),
-        None => match keybindings.source_of(command) {
-            Some(source) => format!("{command} · {}", source.label()),
-            None => command.to_string(),
-        },
+        Some(recording) => Some(recorded(workspace, recording)),
+        None => source.map(str::to_owned),
+    };
+    let revealed = match (recording, source) {
+        (Some(recording), _) => format!("{command} · {}", recorded(workspace, recording)),
+        (None, Some(source)) => format!("{command} · {source}"),
+        (None, None) => command.to_string(),
     };
 
     // Every chord, not the first one: somebody asking "why did this fire"
@@ -217,11 +225,28 @@ fn binding_row(
         None => value.clone(),
     };
 
-    let words = Words::new(title.to_owned())
-        .with_description(description)
-        .with_keywords(&[
-            &value, "command", "chord", "binding", "shortcut", "key", "rebind", "change",
-        ]);
+    let mut words = Words::new(title.to_owned()).with_keywords(&[
+        &value,
+        command.as_str(),
+        "command",
+        "chord",
+        "binding",
+        "shortcut",
+        "key",
+        "rebind",
+        "change",
+    ]);
+    if let Some(description) = description {
+        words = words.with_description(description);
+    }
+
+    let chord_state = state.control(keyed("chord", command));
+    let button_state = state.control(keyed("binding", command));
+    let (_, search) = workspace.field(SETTINGS_SECTION, "search");
+    let named = recording.is_some()
+        || state.focus.is_on_control(&chord_state)
+        || state.focus.is_on_control(&button_state)
+        || found_by_name(search.editor().text(), title, command);
 
     let chord = widgets::chord_button(
         shown,
@@ -234,7 +259,7 @@ fn binding_row(
             Some(_) => Some(SettingsAction::KeepBinding.into()),
             None => id.and_then(|id| editing(SettingsAction::RecordBinding(id))),
         },
-        state.control(keyed("chord", command)),
+        chord_state,
         fonts,
     );
 
@@ -266,14 +291,37 @@ fn binding_row(
             id.and_then(|id| editing(SettingsAction::UnbindCommand(id))),
         ),
     };
-    let button = widgets::text_button(
-        label,
-        action,
-        state.control(keyed("binding", command)),
-        fonts.ui,
-    );
+    let button = widgets::text_button(label, action, button_state, fonts.ui);
 
-    widgets::row(words, true, widgets::pair(chord, button), fonts.ui)
+    widgets::revealing_row(
+        words,
+        true,
+        widgets::pair(chord, button),
+        widgets::Reveal {
+            state: state.control(keyed("row", command)),
+            revealed,
+            shown: named,
+        },
+        fonts.ui,
+    )
+}
+
+/// Whether a search found a command's row by its action name.
+///
+/// Under every label the page used to print `crook/window/new-tab · Default`,
+/// which is forty lines of one prefix for somebody reading the page to find a
+/// key. The name is drawn now where it is what is being read: under the
+/// pointer, on the row the keyboard is on, while a chord is being recorded for
+/// it — and on a row that is on the page *because* of it, which is this. A
+/// term the title holds as well says nothing about the name: `split` finds
+/// `Split to the left` by its title, and `split-left` finds it by nothing
+/// else.
+fn found_by_name(search: &str, title: &str, command: &ActionName) -> bool {
+    let title = title.to_lowercase();
+    search
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .any(|term| !title.contains(&term) && command.as_str().contains(&term))
 }
 
 /// The line under a row that is recording: what to press, and what is in the

@@ -56,7 +56,7 @@
 use std::sync::Arc;
 
 use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
-use crookui_core::fonts::{FamilyId, Properties, Weight};
+use crookui_core::fonts::{DEFAULT_UI_LINE_HEIGHT_RATIO, FamilyId, Properties, Weight};
 use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
@@ -93,6 +93,9 @@ const CHECK_SIZE: f32 = 13.;
 /// box on a card, before the first rule, so that the rule sits above a box
 /// exactly where it sits above the last row of a category.
 pub(crate) const ROW_SPACING: f32 = 14.;
+
+/// The air between a row's label and the description under it.
+const DESCRIPTION_MARGIN_TOP: f32 = 4.;
 
 /// The gap a note ends in, before whatever is next: another note, a rule, or
 /// a box.
@@ -388,6 +391,115 @@ pub(crate) fn toned_category(
 
 /// One setting: a label, an optional description under it, and a control.
 pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: FamilyId) -> Entry {
+    let element = row_column(
+        words.label.clone(),
+        enabled,
+        control,
+        words.description.clone(),
+        ui,
+    );
+    Entry {
+        words: Some(words),
+        value: None,
+        element: Container::new(element)
+            .with_margin_bottom(ROW_SPACING)
+            .finish(),
+    }
+}
+
+/// A [`row`] whose second line says more while the pointer is on it, or while
+/// `shown` says it should.
+///
+/// For a fact a person wants now and then and not on every line: the action
+/// name under a row of the Keyboard Shortcuts page, which is what goes in a
+/// keybindings file and is the same `crook/window/` forty times down the page
+/// for anybody who is only reading it. At rest the row's description is drawn,
+/// and `revealed` replaces it under the pointer, or when the caller has a
+/// reason of its own — the keyboard is on the row's control, or the search
+/// found the row by the thing `revealed` says.
+///
+/// `revealed` is not one of the row's words, so a caller that wants it
+/// searchable says so in the keywords; it is the caller who knows whether it
+/// should be.
+///
+/// A row with no description at rest keeps the room for one, empty: the line
+/// appearing under the pointer would push every row below it down, and the row
+/// under the pointer would be a different row by the time it was read.
+pub(crate) fn revealing_row(
+    words: Words,
+    enabled: bool,
+    control: Box<dyn Element>,
+    reveal: Reveal,
+    ui: FamilyId,
+) -> Entry {
+    let label = words.label.clone();
+    let resting = words.description.clone();
+    let Reveal {
+        state,
+        revealed,
+        shown,
+    } = reveal;
+
+    let element = Hoverable::new(state, move |mouse| {
+        let description = match shown || mouse.is_hovered() {
+            true => Some(revealed),
+            false => resting,
+        };
+        match description {
+            Some(_) => row_column(label, enabled, control, description, ui),
+            None => {
+                let column = row_column(label, enabled, control, None, ui);
+                Flex::column()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_child(column)
+                    .with_child(description_room())
+                    .finish()
+            }
+        }
+    })
+    .finish();
+
+    Entry {
+        words: Some(words),
+        value: None,
+        element: Container::new(element)
+            .with_margin_bottom(ROW_SPACING)
+            .finish(),
+    }
+}
+
+/// What a [`revealing_row`] says under the pointer, and whether it says it
+/// already.
+pub(crate) struct Reveal {
+    /// The row's own hover, which is a control of the page's like any other
+    /// so that it survives from one frame to the next.
+    pub(crate) state: MouseStateHandle,
+    /// The line drawn instead of the description.
+    pub(crate) revealed: String,
+    /// Whether it is drawn without the pointer.
+    pub(crate) shown: bool,
+}
+
+/// The room one line of description takes, with nothing in it.
+///
+/// What [`description_text`] lays out for a line that fits: its top margin and
+/// one line of [`DESCRIPTION_SIZE`] at the ratio a `Paragraph` sets its lines
+/// at.
+fn description_room() -> Box<dyn Element> {
+    ConstrainedBox::new(Empty::new().finish())
+        .with_height(DESCRIPTION_MARGIN_TOP + DESCRIPTION_SIZE * DEFAULT_UI_LINE_HEIGHT_RATIO)
+        .finish()
+}
+
+/// A row's label, its control beside it, and its description under both.
+fn row_column(
+    label: String,
+    enabled: bool,
+    control: Box<dyn Element>,
+    description: Option<String>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -414,7 +526,7 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
                     // starts anyway, so the `Align` only cost it its wrap.
                     Expanded::new(
                         1.,
-                        Container::new(label_text(words.label.clone(), enabled, ui))
+                        Container::new(label_text(label, enabled, ui))
                             .with_margin_right(LABEL_GAP)
                             .finish(),
                     )
@@ -428,17 +540,11 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
     // of the row's column rather than of the label's: a description confined
     // to the label's share of the line would be cut off at the width of
     // whatever control happens to sit beside it.
-    if let Some(description) = words.description.clone() {
+    if let Some(description) = description {
         column.add_child(description_text(description, ui));
     }
 
-    Entry {
-        words: Some(words),
-        value: None,
-        element: Container::new(column.finish())
-            .with_margin_bottom(ROW_SPACING)
-            .finish(),
-    }
+    column.finish()
 }
 
 /// The least room between a row's label and its control, which is what the
@@ -480,7 +586,7 @@ fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
             .with_color(theme().text_muted)
             .finish(),
     )
-    .with_margin_top(4.)
+    .with_margin_top(DESCRIPTION_MARGIN_TOP)
     .with_margin_right(DESCRIPTION_RIGHT_MARGIN)
     .finish()
 }
