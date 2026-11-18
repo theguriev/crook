@@ -25284,7 +25284,10 @@ mod shells {
                     !frame_text(&scene).contains(says),
                     "{says:?} is up with the pointer off the switch"
                 );
-                let switch = icons_in(&scene, find_bar_box(&scene), icon);
+                // Found before the card is up: the card takes the bar's
+                // corner and surface, so with it up there are two of them.
+                let (bar, pane) = (find_bar_box(&scene), panel_boxes(&scene)[0]);
+                let switch = icons_in(&scene, bar, icon);
                 assert_eq!(switch.len(), 1, "one {says:?} switch on the bar");
 
                 harness.move_to(center(switch[0]));
@@ -25307,11 +25310,11 @@ mod shells {
                         rect.corner_radius.get_top_left()
                             == Radius::Pixels(crate::style::radius::MEDIUM)
                             && rect.background == Fill::Solid(theme().surface_raised)
+                            && rect.bounds != bar
                     })
                     .map(|rect| rect.bounds)
                     .collect();
                 assert_eq!(notes.len(), 1, "one note for {says:?}");
-                let (bar, pane) = (find_bar_box(&scene), panel_boxes(&scene)[0]);
                 assert!(
                     notes[0].min_y() > bar.max_y() && notes[0].max_x() <= pane.max_x(),
                     "the note at {:?} is not under the bar at {bar:?} inside the pane at {pane:?}",
