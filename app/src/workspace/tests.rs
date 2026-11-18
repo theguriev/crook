@@ -18210,12 +18210,20 @@ fn the_about_page_names_the_folder_the_logs_and_crash_reports_are_in() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("the scratch folder has a name");
-    let (_, row) = lines
+    let (label_at, _) = lines
         .iter()
         .find(|(_, line)| line.starts_with("Logs and crash reports"))
         .unwrap_or_else(|| panic!("the About page has no row for the logs: {lines:?}"));
+    // The label and the value are two sizes of text centred on one row, so
+    // their baselines are a fraction apart and may round to two lines: the
+    // row is every line within a few pixels of the label's.
+    let row: String = lines
+        .iter()
+        .filter(|(at, _)| (at.y() - label_at.y()).abs() < 4.)
+        .map(|(_, line)| line.as_str())
+        .collect();
     assert!(
-        row.contains(folder) && row.ends_with("Open"),
+        row.contains(folder) && row.contains("Open"),
         "the row does not name the folder and offer to open it: {row:?}"
     );
     assert!(
@@ -40620,11 +40628,16 @@ mod section_layout {
     /// Where the page's own heading is drawn, which is the copy beside the
     /// list rather than the one in it.
     fn title_line(scene: &Scene, title: &str) -> Vector2F {
+        // Starting with it rather than being it: a scene has no occlusion,
+        // and a control scrolled up under the pinned title shares its
+        // baseline — the line is then the title with the control's glyphs
+        // after it, and it still starts where the title does.
         let pane = settings_pane_box(scene);
-        text_lines(scene, |position| position.x() > pane.min_x())
-            .into_iter()
-            .find(|(_, line)| line.trim() == title)
-            .unwrap_or_else(|| panic!("no line on the page reading {title:?}"))
+        let lines = text_lines(scene, |position| position.x() > pane.min_x());
+        lines
+            .iter()
+            .find(|(_, line)| line.trim().starts_with(title))
+            .unwrap_or_else(|| panic!("no line on the page reading {title:?}: {lines:?}"))
             .0
     }
 }
@@ -52207,8 +52220,18 @@ mod connecting_agents {
         assert!(says(&scene, "Update"), "{text}");
         assert!(!says(&scene, "Not connected"), "{text}");
         // And how to have Claude Code keep it up to date, which it has no
-        // command for.
-        assert!(says(&scene, "Enable auto-update"), "{text}");
+        // command for: its first sentence on the row, and the how behind
+        // the row's "More".
+        assert!(says(&scene, "has no command that turns it on"), "{text}");
+        assert!(!says(&scene, "Enable auto-update"), "{text}");
+        let (label, _) = page_line(&scene, "Keep Claude Code");
+        let (more, _) = page_lines(&scene)
+            .into_iter()
+            .find(|(at, line)| at.y() > label.y() && line == "More")
+            .unwrap_or_else(|| panic!("the row has no More: {text}"));
+        harness.click(more + vec2f(4., -4.), MouseButton::Left);
+        let scene = harness.frame();
+        assert!(says(&scene, "Enable auto-update"), "{}", frame_text(&scene));
     }
 
     #[test]
@@ -53232,4 +53255,126 @@ fn a_checkout_s_path_too_long_for_its_row_keeps_its_start_and_its_last_directory
         !start.is_empty() && wholes.iter().any(|whole| whole.starts_with(&start)),
         "{path:?} does not start where the path does, {wholes:?}"
     );
+}
+
+/// What a settings page says at a glance: facts that do not look like
+/// switched-off settings, and long prose folded behind "More". See
+/// `settings_page::prose`.
+mod settings_prose {
+    use super::*;
+
+    /// Presses one bare key the way the window does, and draws what follows.
+    fn key(harness: &mut Harness, key: &str) {
+        let chars = if key == "space" { " " } else { "" };
+        harness.press(key, Modifiers::default(), chars);
+        harness.frame();
+    }
+
+    /// The Shell page, with `query` in the box when there is one.
+    fn shell(query: &str) -> Harness {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("Shell");
+        harness.frame();
+        if !query.is_empty() {
+            harness.type_text(query);
+            harness.frame();
+        }
+        harness
+    }
+
+    /// The colour of the glyph that starts at `at`, on its line.
+    fn color_at(scene: &Scene, at: Vector2F) -> Color {
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .find(|glyph| (glyph.position - at).length() < 0.5)
+            .map(|glyph| glyph.color)
+            .unwrap_or_else(|| panic!("no glyph at {at:?}"))
+    }
+
+    #[test]
+    fn a_fact_is_labelled_like_a_setting_and_says_its_value_quietly() {
+        // The label used to be muted and the value lit, which is how a row
+        // looks when another option has switched it off: the About page
+        // read as a page of disabled settings.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("About");
+        let scene = harness.frame();
+
+        assert_eq!(page_line_color(&scene, "Version"), theme().text_primary);
+        let value = page_word(&scene, env!("CARGO_PKG_VERSION"));
+        assert_eq!(color_at(&scene, value), theme().text_muted);
+    }
+
+    #[test]
+    fn a_long_description_shows_its_first_sentence_and_more_opens_the_rest() {
+        let mut harness = shell("");
+        let scene = harness.frame();
+        assert!(says(&scene, "What Tab does while a command"));
+        assert!(
+            !says(&scene, "Either way Right takes the suggestion"),
+            "the Tab key row's second sentence is not folded: {}",
+            frame_text(&scene)
+        );
+
+        // From the keyboard: the row's control, then its More.
+        harness.type_text("tab key");
+        harness.frame();
+        key(&mut harness, "down");
+        key(&mut harness, "down");
+        key(&mut harness, "enter");
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "Either way Right takes the suggestion"),
+            "Enter on More did not open the fold: {}",
+            frame_text(&scene)
+        );
+        assert!(says(&scene, "Less"), "{}", frame_text(&scene));
+
+        // And Space on Less, which is the same stop, shuts it again.
+        key(&mut harness, "space");
+        let scene = harness.frame();
+        assert!(!says(&scene, "Either way Right takes the suggestion"));
+        assert!(says(&scene, "More"));
+    }
+
+    #[test]
+    fn an_open_fold_stays_open_on_another_page_and_back() {
+        let mut harness = shell("tab key");
+        key(&mut harness, "down");
+        key(&mut harness, "down");
+        key(&mut harness, "enter");
+        // Back to the box, then the box emptied, so the page shown next is
+        // the one chosen rather than the one the query found.
+        key(&mut harness, "escape");
+        key(&mut harness, "escape");
+        assert_eq!(harness.search_text(), "");
+        harness.select_settings_section("About");
+        harness.frame();
+        harness.select_settings_section("Shell");
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "Either way Right takes the suggestion"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_search_that_finds_words_behind_more_shows_them() {
+        // "Ctrl-Space" is only in the Tab key row's folded sentence: the
+        // row is found by it, and the sentence that found it is on screen,
+        // with no "Less" that could not close what the query holds open.
+        let mut harness = shell("ctrl-space");
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "Either way Right takes the suggestion"),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(!says(&scene, "Less"), "{}", frame_text(&scene));
+        assert!(!says(&scene, "More"), "{}", frame_text(&scene));
+    }
 }

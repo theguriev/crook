@@ -61,6 +61,7 @@ use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use super::focus::{self, Keys, Stop};
+use super::prose;
 use super::search::{Query, Words};
 use crate::plugin::Face;
 use crate::plugins::pictures::Picture;
@@ -579,16 +580,21 @@ fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
 /// wherever a description is long — under a slot that lists eight entries, or
 /// in the window the docked Themes panel leaves — and at the line height a
 /// `Text` draws one line at, so a description that fitted draws the pixels it
-/// drew.
+/// drew. On a settings page a long one is folded behind "More": see
+/// [`prose`].
 fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Paragraph::new(description, ui, DESCRIPTION_SIZE)
-            .with_color(theme().text_muted)
-            .finish(),
-    )
-    .with_margin_top(DESCRIPTION_MARGIN_TOP)
-    .with_margin_right(DESCRIPTION_RIGHT_MARGIN)
-    .finish()
+    let paragraph = |text: String| {
+        Container::new(
+            Paragraph::new(text, ui, DESCRIPTION_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .with_margin_right(DESCRIPTION_RIGHT_MARGIN)
+        .finish()
+    };
+    Container::new(prose::folded(&description, ui, paragraph))
+        .with_margin_top(DESCRIPTION_MARGIN_TOP)
+        .finish()
 }
 
 /// A label and description with a list of values under them, one of which is
@@ -1761,7 +1767,15 @@ const THEME_ROW_RADIUS: f32 = crate::style::radius::LARGE;
 /// stops, and `Themes folder/tmp/...` reads as one word.
 const FACT_GAP: f32 = 16.;
 
-/// A label and a value that cannot be edited, for the About page.
+/// A label and a value that cannot be edited: a version, a font, the shell a
+/// pane runs.
+///
+/// The label is set like any row's, in the text colour, and it is the *value*
+/// that is quiet. The other way round — a muted label and a bright value —
+/// was the shape a disabled row has, so a page that said which shell a pane
+/// runs looked as if it had a setting for it that was switched off. A value
+/// in the muted colour, right-aligned where a control would stand, reads as
+/// what it is: something the page is telling you, not asking.
 ///
 /// `monospace` is for the values that are paths: a settings file's location is
 /// something a person copies into a shell, and proportional text turns runs of
@@ -1816,7 +1830,7 @@ fn fact_row(
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
             Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
-                .with_color(theme().text_muted)
+                .with_color(theme().text_primary)
                 .finish(),
         )
         .with_child(
@@ -1833,7 +1847,7 @@ fn fact_row(
                                 LABEL_SIZE
                             },
                         )
-                        .with_color(theme().text_primary)
+                        .with_color(theme().text_muted)
                         .with_ellipsis(cut)
                         .finish(),
                     )
@@ -1877,9 +1891,13 @@ fn fact_row(
 /// Unsearchable, deliberately: a note explains the rows around it, so it goes
 /// wherever its category goes and is left out the moment something is being
 /// searched for.
+///
+/// On a settings page a long one is folded to the sentences that fit in two
+/// lines, with the rest behind "More" — the "How it works" paragraphs were
+/// longer than the rows they explain. See [`prose`].
 pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
     Entry::unsearchable(
-        Container::new(note_text(text, ui))
+        Container::new(prose::folded(text, ui, |text| note_text(&text, ui)))
             .with_margin_bottom(NOTE_GAP)
             .finish(),
     )

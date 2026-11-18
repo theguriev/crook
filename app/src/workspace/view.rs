@@ -14090,6 +14090,10 @@ impl Workspace {
                 self.sync_input_keys();
                 ctx.notify();
             }
+            SettingsAction::ToggleProse(id) => {
+                self.page.prose.toggle(id);
+                ctx.notify();
+            }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset
                 // ends the command line's overrides exactly as clicking each
