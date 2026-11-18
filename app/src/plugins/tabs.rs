@@ -291,7 +291,7 @@ const RENAME_PLACEHOLDER: &str = "name";
 
 /// What the emoji field says while it is empty, which is also what Enter on
 /// it then does.
-const EMOJI_PLACEHOLDER: &str = "paste one, or leave it empty";
+const EMOJI_PLACEHOLDER: &str = "search, or paste an emoji";
 
 /// Whether a rename is being typed, and what it is about.
 ///
@@ -530,20 +530,26 @@ impl Plugin for Tabs {
         }
 
         // The automatic emoji back, as a command: it is the one choice a
-        // person who chose one may want from the palette. The picks are bare
-        // actions — thirty-one palette rows of one emoji each would bury
-        // everything else this plugin offers.
+        // person who chose one may want from the palette.
         host.register_command(action("no-emoji"), "Use the automatic tab emoji", {
             let rename = self.rename.clone();
             move |workspace, ctx| set_emoji(workspace, &rename, None, ctx)
         });
-        for (index, pick) in EMOJI_PICKS.iter().enumerate() {
+        // Any emoji, as what the action is *about*: one action for all of
+        // them rather than one per cell, since a search can put any of
+        // nearly two thousand in the grid. `--action "crook/tabs/set-emoji
+        // 🦊"` reaches it too. Something said that is not an emoji does
+        // nothing, rather than putting a letter on the row.
+        host.register_action(action("set-emoji"), {
             let rename = self.rename.clone();
-            let emoji = TabEmoji::new(pick);
-            host.register_action(action(&format!("emoji-{index}")), move |workspace, ctx| {
-                set_emoji(workspace, &rename, emoji, ctx);
-            });
-        }
+            move |workspace, ctx| {
+                let said = workspace.host().said();
+                if !crate::tab::emoji::is_emoji(&said) {
+                    return;
+                }
+                set_emoji(workspace, &rename, TabEmoji::new(&said), ctx);
+            }
+        });
 
         host.register_command(
             action("new-group-with-tab"),
@@ -841,16 +847,22 @@ impl Plugin for Tabs {
                     return;
                 }
                 if what == Renaming::Emoji {
-                    // An emptied field is the automatic emoji back. Text that
-                    // is no one grapheme that fits changes nothing, rather
-                    // than putting half a picture on the row.
-                    let emoji = match TabEmoji::new(&typed) {
-                        Some(emoji) => Some(emoji),
-                        None if typed.is_empty() => None,
-                        None => {
+                    // The field takes a paste and a search. An emptied field
+                    // is the automatic emoji back; a pasted emoji is that
+                    // emoji; words are the first emoji the grid shows for
+                    // them — the one Enter is understood to mean — and words
+                    // that find none change nothing.
+                    let emoji = if typed.is_empty() {
+                        None
+                    } else if crate::tab::emoji::is_emoji(&typed) {
+                        TabEmoji::new(&typed)
+                    } else {
+                        let Some(first) = crate::tab::emoji::search(&typed, 1).first().copied()
+                        else {
                             workspace.close_tab_context_menu(ctx);
                             return;
-                        }
+                        };
+                        TabEmoji::new(first)
                     };
                     if let Some((tab, _)) = workspace.menu_target() {
                         workspace.close_tab_context_menu(ctx);
@@ -1005,7 +1017,7 @@ impl Plugin for Tabs {
             &self.rename,
             &field,
         );
-        emoji_grid(host, 303, &self.rename);
+        emoji_grid(host, 303, &self.rename, &field);
         contribute(host, "close-tab", 400, |workspace, _| {
             workspace.menu_target().is_some()
         });
@@ -1301,19 +1313,23 @@ fn set_emoji(
     );
 }
 
+/// How many emoji a search shows at most: five rows of the grid, one more
+/// than the picks take, so the menu grows by a row rather than by a page.
+pub(crate) const EMOJI_FOUND: usize = 5 * EMOJI_COLUMNS;
+
 /// Contributes the grid under the emoji field, while that field is showing.
 ///
 /// Only then: the menu is a list of sentences, and four rows of pictures in
 /// it on every right-click would make it a picker with a menu attached.
-fn emoji_grid(host: &mut Host, order: i32, rename: &Rc<Rename>) {
+///
+/// What the grid holds follows the field. Empty, it is the automatic one and
+/// [`EMOJI_PICKS`]; words, it is what the whole of Unicode's table has for
+/// them; an emoji pasted, it is that emoji, so a click or Enter takes it.
+fn emoji_grid(host: &mut Host, order: i32, rename: &Rc<Rename>, field: &TextInput) {
     let none = host.action(&action("no-emoji"));
-    let picks: Vec<(&'static str, Option<ActionId>)> = EMOJI_PICKS
-        .iter()
-        .enumerate()
-        .map(|(index, pick)| (*pick, host.action(&action(&format!("emoji-{index}")))))
-        .collect();
-    debug_assert_eq!((picks.len() + 1) % EMOJI_COLUMNS, 0);
+    debug_assert_eq!((EMOJI_PICKS.len() + 1) % EMOJI_COLUMNS, 0);
     let rename = rename.clone();
+    let field = field.clone();
 
     host.contribute(
         TAB_MENU_ENTRIES,
@@ -1327,21 +1343,47 @@ fn emoji_grid(host: &mut Host, order: i32, rename: &Rc<Rename>) {
                 .menu_target()
                 .and_then(|(tab, _)| workspace.tabs().get(tab))
                 .map(Tab::emoji)?;
-            let mut cells = vec![(
-                "crook/tabs/no-emoji".to_owned(),
-                None,
-                chosen.is_none(),
-                WorkspaceAction::Run(none?),
-            )];
-            for (index, (pick, id)) in picks.iter().enumerate() {
-                let Some(id) = id else {
+            let typed = field.editor().text().trim().to_owned();
+            let mut cells = Vec::new();
+            let shown: Vec<String> = if typed.is_empty() {
+                cells.push((
+                    "crook/tabs/no-emoji".to_owned(),
+                    None,
+                    chosen.is_none(),
+                    WorkspaceAction::Run(none?),
+                ));
+                EMOJI_PICKS.iter().map(|pick| (*pick).to_owned()).collect()
+            } else if crate::tab::emoji::is_emoji(&typed) {
+                TabEmoji::new(&typed)
+                    .map(|emoji| emoji.as_str().to_owned())
+                    .into_iter()
+                    .collect()
+            } else {
+                crate::tab::emoji::search(&typed, EMOJI_FOUND)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            };
+            if shown.is_empty() && cells.is_empty() {
+                return Some(inert_entry(
+                    workspace,
+                    "crook/tabs/emoji-none-found",
+                    "No emoji is called that",
+                ));
+            }
+            let set = action("set-emoji");
+            for (index, emoji) in shown.into_iter().enumerate() {
+                let Some(press) = workspace.run_about(&set, &emoji) else {
                     continue;
                 };
+                // Keyed by place, not by emoji: the menu keeps a mouse state
+                // per key, and a search can show any of two thousand.
+                let is_chosen = chosen.is_some_and(|chosen| chosen.as_str() == emoji);
                 cells.push((
-                    format!("crook/tabs/emoji-{index}"),
-                    Some((*pick).to_owned()),
-                    chosen.is_some_and(|chosen| chosen.as_str() == *pick),
-                    WorkspaceAction::Run(*id),
+                    format!("crook/tabs/emoji-cell-{index}"),
+                    Some(emoji),
+                    is_chosen,
+                    press,
                 ));
             }
             Some(emoji_grid_entry(workspace, cells))

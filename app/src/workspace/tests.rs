@@ -40561,11 +40561,9 @@ fn an_emoji_picked_from_the_grid_goes_on_the_tab_and_gives_the_keyboard_back() {
         "choosing an emoji did not put the grid in the menu"
     );
 
-    let owl = crate::plugins::tabs::EMOJI_PICKS
-        .iter()
-        .position(|pick| *pick == OWL)
-        .expect("the owl is one of the picks");
-    harness.run_command(&format!("crook/tabs/emoji-{owl}"));
+    assert!(crate::plugins::tabs::EMOJI_PICKS.contains(&OWL));
+    // What a cell carries: the one action, about the emoji it shows.
+    harness.run_about("crook/tabs/set-emoji", OWL);
 
     assert_eq!(chosen_emoji(&harness, tab).as_deref(), Some(OWL));
     assert_the_shell_has_the_keyboard_again(&mut harness);
@@ -40573,6 +40571,67 @@ fn an_emoji_picked_from_the_grid_goes_on_the_tab_and_gives_the_keyboard_back() {
     // And back to whatever draws it by itself.
     harness.run_command("crook/tabs/no-emoji");
     assert_eq!(chosen_emoji(&harness, tab), None);
+}
+
+/// A dragon, which is not one of the picks and so is only ever reached by
+/// a search.
+const DRAGON: &str = "\u{1f409}";
+
+#[test]
+fn words_typed_into_the_emoji_field_search_all_of_unicode_and_enter_takes_the_first() {
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    assert!(!crate::plugins::tabs::EMOJI_PICKS.contains(&DRAGON));
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/choose-emoji");
+    harness.frame();
+    harness.type_text("dragon");
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, DRAGON),
+        "a search for a dragon did not put one in the grid"
+    );
+    assert!(
+        !tab_menu_offers(&scene, OWL),
+        "the picks stayed up beside the search's answers"
+    );
+
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(
+        chosen_emoji(&harness, tab).as_deref(),
+        Some(DRAGON),
+        "Enter on words did not take the first emoji they found"
+    );
+}
+
+#[test]
+fn a_search_that_finds_nothing_says_so_and_enter_on_it_changes_nothing() {
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.dispatch_action(TabAction::SetEmoji {
+        tab,
+        emoji: crate::tab::TabEmoji::new(OWL),
+    });
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/choose-emoji");
+    harness.frame();
+    harness.type_text("qqqzzz");
+    assert!(tab_menu_offers(&harness.frame(), "No emoji is called that"));
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(chosen_emoji(&harness, tab).as_deref(), Some(OWL));
+
+    // And the action a cell carries refuses what is not an emoji, so no
+    // path puts a letter on a row.
+    harness.run_about("crook/tabs/set-emoji", "q");
+    assert_eq!(chosen_emoji(&harness, tab).as_deref(), Some(OWL));
 }
 
 #[test]

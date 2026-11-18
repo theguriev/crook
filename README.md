@@ -512,8 +512,10 @@ Twenty-two features, and the page that configures them:
   picture of its own, and it is what
   [github.com/theguriev/crook-emoji](https://github.com/theguriev/crook-emoji) does: an emoji
   where the status dot was, asking for no permission at all. A tab you want a particular one
-  on is yours to choose: **Choose tab emoji…** in its menu opens a grid of thirty-one and a
-  field to paste any other into, the choice is kept with the session, and it wins over
+  on is yours to choose: **Choose tab emoji…** in its menu opens a field over a grid of
+  thirty-one. Type into it and the grid searches every emoji Unicode has, by its English or
+  Russian names (`fox`, `лиса`, `germany`), with Enter taking the first; paste one and that is
+  the one. The choice is kept with the session, and it wins over
   whatever a plugin would have drawn there — the empty field, or the × at the head of the
   grid, gives the tab back to the plugin. Beside it,
   [github.com/theguriev/crook-worktree](https://github.com/theguriev/crook-worktree) puts a
