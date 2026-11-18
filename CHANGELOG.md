@@ -5,6 +5,40 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v2.0.0
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.45...v2.0.0)
+
+### Features
+
+- **tabs:** Say a tab's status with a shape as well as a colour ([#586](https://github.com/theguriev/crook/pull/586))
+- **palette:** Show an action's id where it helps, not on every row ([#589](https://github.com/theguriev/crook/pull/589))
+- **ui:** Name icon-only buttons in a tooltip, with their keys ([#590](https://github.com/theguriev/crook/pull/590))
+- **worktrees:** Write a checkout's path from the store and cut it in the middle ([#591](https://github.com/theguriev/crook/pull/591))
+- **worktrees:** Name the creator's second button Run now and say what Create does ([#592](https://github.com/theguriev/crook/pull/592))
+- **plugins:** Put installed plugins first and fold the built-in ones ([#593](https://github.com/theguriev/crook/pull/593))
+- **tabs:** Count a pane with a question once in the header chip ([#594](https://github.com/theguriev/crook/pull/594))
+- **blocks:** Say how a command ended and how long it ran ([#595](https://github.com/theguriev/crook/pull/595))
+- **tabs:** Open a tab's menu above a row too near the foot of the window ([#596](https://github.com/theguriev/crook/pull/596))
+- **settings:** Tell facts from settings and fold long prose behind More ([#597](https://github.com/theguriev/crook/pull/597))
+- **window:** Fold the tabs panel when the window is too narrow for it ([#598](https://github.com/theguriev/crook/pull/598))
+- **settings:** Lift commands out of the prose with a Copy button ([#601](https://github.com/theguriev/crook/pull/601))
+
+### Fixes
+
+- **theme:** Tune the bright colours Crook's own themes give tabs and output ([#585](https://github.com/theguriev/crook/pull/585))
+- **theme:** Give a made theme colours its background can carry ([#588](https://github.com/theguriev/crook/pull/588))
+- **theme:** Put readable text on accent-coloured buttons ([#599](https://github.com/theguriev/crook/pull/599))
+- **theme:** Keep muted text readable in low-contrast palettes ([#600](https://github.com/theguriev/crook/pull/600))
+
+### Refactors
+
+- **ui:** One type scale and one radius scale for the chrome ([#587](https://github.com/theguriev/crook/pull/587))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.45
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.44...v0.1.45)
