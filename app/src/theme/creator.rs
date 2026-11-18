@@ -293,6 +293,60 @@ fn accent_for(
 
 /// The sixteen a generated theme is given.
 ///
+/// One of the two standard sets — see [`standard_for`] — with each of its six
+/// colours moved, by lightness alone, until it reads as text on `background`.
+///
+/// The standard sets are fixed, and a background is anything the clustering
+/// found: on the dark grey Crook Dark offers first, the xterm blue `ls` draws
+/// directories in is 1.3:1, and on the saturated red or violet it offers
+/// beside it, nearly all of either set is a shade of the ground it is written
+/// on.
+/// Warp's creator stops at the fixed set and so hands out themes whose own
+/// preview cannot be read. Here every colour from red to cyan, in both halves,
+/// is held to WCAG's 4.5:1 for text against the background it was made for —
+/// the same bar Crook's own themes are held to.
+///
+/// **Only lightness moves**, in OKLCH, so red stays red and blue stays blue:
+/// a theme whose `git diff` deletions came out orange would be legible and
+/// wrong. Chroma gives way only where sRGB has no room for it at the new
+/// lightness. A colour that already reads is left exactly as it was.
+///
+/// On a mid-tone swatch — a green or an orange halfway up, where neither black
+/// nor white is much past 4.5:1 — that leaves room for little but tints of
+/// near-black and near-white, and the colours come out so. That is the honest
+/// price of reading them; the swatch is still the person's to pick.
+///
+/// **The bright half stays brighter.** Colour 9 is the louder colour 1, and a
+/// bright colour that had to move is moved at least [`BRIGHT_STEP`] past where
+/// its normal one landed, so the two cannot meet at the same threshold and
+/// become one colour.
+///
+/// Black and white — slots 0, 7, 8 and 15 — are the standard set's. Black is
+/// the shadow slot and is meant to disappear into a dark grid; the greys are
+/// what a program dims things with, quieter on purpose.
+pub fn ansi_for(background: Color) -> ([Color; 8], [Color; 8]) {
+    let (mut normal, mut bright) = standard_for(background);
+
+    for index in 1..7 {
+        let lighten = lightens(normal[index], background);
+        normal[index] = carried(normal[index], background, lighten, None);
+
+        if contrast(bright[index], background) < TEXT_CONTRAST {
+            let normal_lightness = Oklch::of(normal[index]).l;
+            let past = if lighten {
+                normal_lightness + BRIGHT_STEP
+            } else {
+                normal_lightness - BRIGHT_STEP
+            };
+            bright[index] = carried(bright[index], background, lighten, Some(past));
+        }
+    }
+
+    (normal, bright)
+}
+
+/// Which standard set a background starts from.
+///
 /// Two fixed sets, as Warp has two: the xterm values every terminal agrees on,
 /// and the darkened set `Crook Light` carries — the standard bright colours
 /// are chosen to sit on black and are unreadable on white.
@@ -303,8 +357,10 @@ fn accent_for(
 /// background takes black text, so Warp's rule hands it the palette meant for
 /// paper, and `ls` comes out in colours a shade away from what it is written
 /// on. Here each set is scored against the background it will actually be
-/// drawn on, and the one whose worst colour reads best wins.
-pub fn ansi_for(background: Color) -> ([Color; 8], [Color; 8]) {
+/// drawn on, and the one whose worst colour reads best wins. [`ansi_for`] then
+/// moves whatever in it still does not read; starting from the nearer set is
+/// what keeps that move small.
+fn standard_for(background: Color) -> ([Color; 8], [Color; 8]) {
     // The *average* of the seven colours a program actually prints text in,
     // rather than the worst of them. Two slots would decide it wrongly on
     // their own: colour 0 is the shadow slot and is meant to disappear into a
@@ -325,6 +381,81 @@ pub fn ansi_for(background: Color) -> ([Color; 8], [Color; 8]) {
     } else {
         (LIGHT.terminal.normal, LIGHT.terminal.bright)
     }
+}
+
+/// The contrast a generated theme's colours are held to: WCAG's 4.5:1 for
+/// text, which is what a terminal's colours are.
+const TEXT_CONTRAST: f32 = 4.5;
+
+/// How much further from the background, in OKLCH lightness, a bright colour
+/// that had to move lands than its normal one did.
+///
+/// Five hundredths: enough that `\e[31m` and `\e[91m` side by side are two
+/// colours, small enough that the bright one does not run out of room before
+/// it reaches black or white.
+const BRIGHT_STEP: f32 = 0.05;
+
+/// Whether `color` is made to read on `background` by lightening it.
+///
+/// The side of the background it is already on, when black or white on that
+/// side can reach [`TEXT_CONTRAST`]: a yellow on a red ground reads better
+/// lighter, and darkening it would pass through the ground's own lightness on
+/// the way. Otherwise the other side, which can — of black and white one is
+/// always at least 4.58:1 against any colour, the square root of 21.
+fn lightens(color: Color, background: Color) -> bool {
+    let above = relative_luminance(color) >= relative_luminance(background);
+    let reaches = |lighter: bool| {
+        let end = if lighter { Color::WHITE } else { Color::BLACK };
+        contrast(end, background) >= TEXT_CONTRAST
+    };
+    if reaches(above) { above } else { !above }
+}
+
+/// `color`, with its lightness moved toward white (`lighten`) or black just
+/// far enough to read on `background`.
+///
+/// `past` is a lightness the result has to be at or beyond in that direction,
+/// whether or not the contrast alone would ask for it; it is how a bright
+/// colour is kept clear of its normal one. Without it, a colour that already
+/// reads comes back untouched rather than through a round trip.
+fn carried(color: Color, background: Color, lighten: bool, past: Option<f32>) -> Color {
+    if past.is_none() && contrast(color, background) >= TEXT_CONTRAST {
+        return color;
+    }
+
+    let source = Oklch::of(color);
+    let end = if lighten { 1. } else { 0. };
+    let start = match past {
+        Some(past) if lighten => source.l.max(past),
+        Some(past) => source.l.min(past),
+        None => source.l,
+    }
+    .clamp(0., 1.);
+
+    let reads = |lightness: f32| {
+        let candidate = source.at_lightness(lightness);
+        (contrast(candidate, background) >= TEXT_CONTRAST).then_some(candidate)
+    };
+    if let Some(already) = reads(start) {
+        return already;
+    }
+
+    // Halving the distance between a lightness that does not read and one
+    // that does. The far end always does — see `lightens` — and twenty halvings
+    // is a step far finer than one sRGB level.
+    let (mut short, mut far) = (start, end);
+    let mut found = reads(end).unwrap_or(if lighten { Color::WHITE } else { Color::BLACK });
+    for _ in 0..20 {
+        let middle = (short + far) / 2.;
+        match reads(middle) {
+            Some(candidate) => {
+                far = middle;
+                found = candidate;
+            }
+            None => short = middle,
+        }
+    }
+    found
 }
 
 /// The WCAG 2.0 contrast ratio between two colours, 1 to 21.
@@ -428,6 +559,112 @@ impl Lab {
 
         Color::rgb(channel(linear_r), channel(linear_g), channel(linear_b))
     }
+}
+
+/// A colour in OKLCH: Björn Ottosson's OKLab, as lightness, chroma and hue.
+///
+/// What [`ansi_for`] moves colours in, rather than the CIE L\*a\*b\* the
+/// clustering uses, because of one colour: lightening blue at constant
+/// L\*a\*b\* hue turns it purple, and blue is the colour that most needs
+/// lightening on a dark grid. OKLab was made to keep hue steady along exactly
+/// that path.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Oklch {
+    l: f32,
+    c: f32,
+    /// Radians.
+    h: f32,
+}
+
+impl Oklch {
+    /// sRGB to OKLCH, through linear RGB and the LMS cone space, with
+    /// Ottosson's published matrices.
+    fn of(color: Color) -> Self {
+        let (r, g, b) = (to_linear(color.r), to_linear(color.g), to_linear(color.b));
+        let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_99 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+
+        let lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
+        let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+        let b = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+
+        Self {
+            l: lightness,
+            c: a.hypot(b),
+            h: b.atan2(a),
+        }
+    }
+
+    /// The colour with this hue at `lightness`, with as much of this chroma as
+    /// sRGB has room for there.
+    ///
+    /// Chroma is what gives way because it is the one of the three a reader
+    /// notices least: a blue a little less saturated is still the blue, a blue
+    /// a little more violet is not. The room is found by halving, since the
+    /// edge of sRGB has no closed form in OKLCH.
+    fn at_lightness(self, lightness: f32) -> Color {
+        let fits = |chroma: f32| linear_rgb(lightness, chroma, self.h);
+        if let Some(rgb) = fits(self.c) {
+            return from_linear_rgb(rgb);
+        }
+        let (mut inside, mut outside) = (0., self.c);
+        for _ in 0..16 {
+            let middle = (inside + outside) / 2.;
+            if fits(middle).is_some() {
+                inside = middle;
+            } else {
+                outside = middle;
+            }
+        }
+        let rgb = linear_rgb(lightness, inside, self.h).unwrap_or([lightness; 3]);
+        from_linear_rgb(rgb)
+    }
+}
+
+/// OKLCH to linear sRGB, or nothing when the colour is outside sRGB.
+///
+/// A hair of tolerance either side, so that the rounding in the matrices does
+/// not call white, at lightness 1 and chroma 0, out of range.
+fn linear_rgb(lightness: f32, chroma: f32, hue: f32) -> Option<[f32; 3]> {
+    let (a, b) = (chroma * hue.cos(), chroma * hue.sin());
+    let l = (lightness + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m = (lightness - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s = (lightness - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+
+    let rgb = [
+        4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+        -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+        -0.004_196_086 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+    ];
+    const SLACK: f32 = 1e-4;
+    rgb.iter()
+        .all(|channel| (-SLACK..=1. + SLACK).contains(channel))
+        .then_some(rgb)
+}
+
+/// One sRGB channel with its gamma curve undone, 0 to 1.
+fn to_linear(value: u8) -> f32 {
+    let value = f32::from(value) / 255.;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear sRGB back to a colour, with the gamma curve put back.
+fn from_linear_rgb([r, g, b]: [f32; 3]) -> Color {
+    let channel = |value: f32| {
+        let value = value.clamp(0., 1.);
+        let value = if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1. / 2.4) - 0.055
+        };
+        (value * 255.).round().clamp(0., 255.) as u8
+    };
+    Color::rgb(channel(r), channel(g), channel(b))
 }
 
 /// ΔE76: the straight-line distance between two colours in L\*a\*b\*.
