@@ -1775,14 +1775,60 @@ const EMOJI_MARK_SIZE: f32 = 16.;
 /// told from one whose agent stopped without a pointer over it. The other
 /// three states stay still — they are each waiting on a person or on nothing,
 /// and a mark that moved for them would be asking for a look it has already
-/// asked for with its colour.
+/// asked for with its colour and the glyph cut into it.
 pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
     let color = mark_color(workspace, status);
     match workspace.options().status_marks {
-        StatusMarks::Dots => disc(color),
+        StatusMarks::Dots => disc(
+            color,
+            disc_glyph(status, workspace.motion_is_reduced()).map(|icon| (icon, status)),
+        ),
         StatusMarks::Glyphs => glyph(status, color),
     }
 }
+
+/// The glyph drawn inside the disc for `status`, if it has one.
+///
+/// WCAG's 1.4.1: a colour cannot be the only thing that tells a row asking
+/// for a person from a row whose agent failed. Amber and red are a pair a
+/// person with a red-green deficiency cannot separate, and a pair that a
+/// theme with a muted palette, a greyscale screenshot or a glance across the
+/// room cannot either. So each state that asks for a look carries a shape
+/// of its own as well: the `bell` the header's "waiting" chip already uses
+/// for the same panes, and the `x` everybody reads as "it failed".
+///
+/// Running has its own shape already, which is movement — the breath — and
+/// it keeps only that while the window is allowed to move. When it is not,
+/// a still accent disc is told from an idle one by colour alone again, so a
+/// `play` stands in for the breath, the glyph the "Glyphs" marks use for the
+/// same state. Idle, which here also means "no agent at all", has nothing:
+/// the plain grey disc is the quietest mark, and the absence of a glyph is
+/// what quiet looks like.
+fn disc_glyph(status: AgentStatus, still: bool) -> Option<Lucide> {
+    match status {
+        AgentStatus::Idle => None,
+        AgentStatus::Running => still.then_some(Lucide::Play),
+        AgentStatus::NeedsInput => Some(Lucide::Bell),
+        AgentStatus::Failed => Some(Lucide::X),
+    }
+}
+
+/// How much of the disc the glyph inside it takes.
+///
+/// The disc is about eighteen pixels across; at this share the glyph is
+/// eleven, which leaves a ring of the status colour round it wide enough to
+/// read as a filled disc with something in it rather than as a glyph with a
+/// coloured halo. Larger, and the bell's flare touches the edge.
+const DISC_GLYPH_RATIO: f32 = 0.62;
+
+/// The stroke the glyph inside the disc is drawn with, in Lucide's 24-unit
+/// grid.
+///
+/// Lucide's own 2 scaled to eleven pixels is under a pixel wide, which at
+/// 1x is a grey smear on the fill rather than a line. At 3 the stroke is
+/// about a pixel and a half, enough for the cross and the bell to be shapes
+/// on a standard-density display.
+const DISC_GLYPH_STROKE: f32 = 3.;
 
 /// The colour a status's mark is drawn in at this moment: its own, faded by
 /// the breath when it is running.
@@ -1801,13 +1847,27 @@ fn mark_color(workspace: &Workspace, status: AgentStatus) -> Color {
 /// two breaths, because a list may hold several of him, and a dozen mouths
 /// at full speed is a flicker.
 ///
-/// The stopped states are a dot in the disc's colour at a badge's inside
-/// size, with no ring: a saturated dot over an emoji does not need one.
-/// Always a dot whatever "Status marks" says, since a glyph at eight pixels
-/// is a smudge too.
+/// Needing input is a dot in the disc's colour at a badge's inside size,
+/// with no ring: a saturated dot over an emoji does not need one. Failing is
+/// a cross in its own colour instead, at the pirate's size: the disc's
+/// glyphs cut into an eight-pixel dot are a pixel or two of contrast and
+/// read as nothing, but the cross drawn as the whole pip is a shape on its
+/// own, so the three a plugin's mark can carry — a pirate, a dot and a
+/// cross — are three shapes and not two colours of one. The same whatever
+/// "Status marks" says, since a glyph inside a glyph at this size is a
+/// smudge either way.
 fn status_pip(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
-    if status == AgentStatus::Running {
-        return crate::duo::mark(workspace.breath() / 2, PIP_PIRATE_SIZE);
+    match status {
+        AgentStatus::Running => {
+            return crate::duo::mark(workspace.breath() / 2, PIP_PIRATE_SIZE);
+        }
+        AgentStatus::Failed => {
+            return Icon::new(Lucide::X, PIP_PIRATE_SIZE)
+                .with_color(status_color(status))
+                .with_stroke_width(PIP_CROSS_STROKE)
+                .finish();
+        }
+        AgentStatus::Idle | AgentStatus::NeedsInput => {}
     }
     let diameter = MARK_SIZE * BADGE_RATIO - 2. * BADGE_RING;
     ConstrainedBox::new(
@@ -1827,6 +1887,13 @@ fn status_pip(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
 /// that was picked: the grin and the teeth still read, and he stays a mark
 /// on the emoji's corner rather than a second emoji beside it.
 pub const PIP_PIRATE_SIZE: f32 = 10.;
+
+/// The stroke a failed pip's cross is drawn with, in Lucide's 24-unit grid.
+///
+/// Heavy, because the cross is all there is of the pip: at ten pixels
+/// Lucide's own 2 is a hairline that an emoji's colours swallow, and at 4
+/// the two bars are close to the weight of the dot it stands beside.
+const PIP_CROSS_STROKE: f32 = 4.;
 
 /// How long one frame of a running mark's breath is held.
 ///
@@ -1859,22 +1926,46 @@ fn breath(frame: usize) -> f32 {
 /// What a row's mark is when nothing has replaced it: a status-coloured disc.
 ///
 /// Warp draws a glyph inside the circle and a status ring past its
-/// bottom-right corner. Crook has no icon font, so the status is the disc's
-/// own colour — one mark instead of two, in the same reserved box, so rows
-/// line up with Warp's. The corner it left free is what [`TAB_ROW_BADGE`] is.
-/// The other answer, for a person the colour says nothing to, is [`glyph`].
-fn disc(color: Color) -> Box<dyn Element> {
+/// bottom-right corner. Crook draws one mark instead of two, in the same
+/// reserved box, so rows line up with Warp's: the status is the disc's own
+/// colour, and `inside` — the [`disc_glyph`] for the status, with the status
+/// it is for — is cut into it in a colour that reads on that fill, so the
+/// colour is never the only thing saying it. The corner it left free is what
+/// [`TAB_ROW_BADGE`] is. The other answer, for a person who would rather read
+/// shapes than discs at all, is [`glyph`].
+fn disc(color: Color, inside: Option<(Lucide, AgentStatus)>) -> Box<dyn Element> {
     let diameter = MARK_SIZE * DISC_RATIO;
 
-    ConstrainedBox::new(
-        Container::new(Empty::new().finish())
-            .with_background_color(color)
-            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+    let mut fill = Stack::new().with_child(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(color)
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                .finish(),
+        )
+        .with_width(diameter)
+        .with_height(diameter)
+        .finish(),
+    );
+    if let Some((icon, status)) = inside {
+        // Measured against the status's own colour rather than `color`,
+        // which is the same but for the breath's alpha: a glyph is only ever
+        // drawn on a disc that holds still.
+        fill.add_child(
+            Align::new(
+                Icon::new(icon, diameter * DISC_GLYPH_RATIO)
+                    .with_color(theme().mark_on(status_color(status)))
+                    .with_stroke_width(DISC_GLYPH_STROKE)
+                    .finish(),
+            )
             .finish(),
-    )
-    .with_width(diameter)
-    .with_height(diameter)
-    .finish()
+        );
+    }
+
+    ConstrainedBox::new(fill.finish())
+        .with_width(diameter)
+        .with_height(diameter)
+        .finish()
 }
 
 /// The same mark as a shape rather than a fill: what the host draws under

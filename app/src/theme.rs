@@ -158,15 +158,28 @@ impl Theme {
     /// ground is tried too, and whichever of the two reads better wins, so a
     /// theme somebody else wrote still gets the legible one.
     pub fn on_accent_mark(&self) -> Color {
+        self.mark_on(self.accent)
+    }
+
+    /// A mark to draw on `fill`, by the rule [`Self::on_accent_mark`] gives
+    /// for the accent: `text_primary` where it reads at 3:1, and otherwise
+    /// whichever of it and the palette's own ground reads better.
+    ///
+    /// For the glyph inside a tab's status disc, which sits on the amber and
+    /// the red as well as on the accent. Those two are the terminal's own
+    /// yellow and red, and a light palette darkens them for paper while a
+    /// dark one brightens them for night, so no one of the two candidates is
+    /// right on all of them — the same question the switch's knob asked, on
+    /// three fills instead of one.
+    pub fn mark_on(&self, fill: Color) -> Color {
         const LEGIBLE: f32 = 3.;
-        if creator::contrast(self.text_primary, self.accent) >= LEGIBLE {
+        if creator::contrast(self.text_primary, fill) >= LEGIBLE {
             return self.text_primary;
         }
         [self.text_primary, self.surface]
             .into_iter()
             .max_by(|left, right| {
-                creator::contrast(*left, self.accent)
-                    .total_cmp(&creator::contrast(*right, self.accent))
+                creator::contrast(*left, fill).total_cmp(&creator::contrast(*right, fill))
             })
             .unwrap_or(self.text_primary)
     }

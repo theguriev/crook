@@ -312,6 +312,28 @@ fn the_guard_puts_the_default_back() {
 }
 
 #[test]
+fn a_status_discs_glyph_reads_on_its_fill_in_every_builtin_palette() {
+    // The bell and the cross inside a tab's status disc, on the amber and the
+    // red, and the play on the accent: each at 3:1 against its fill where
+    // either candidate gets there, and otherwise the better of the two.
+    for available in builtins() {
+        let theme = available.theme;
+        for fill in [theme.accent, theme.usage_high, theme.usage_critical] {
+            let mark = theme.mark_on(fill);
+            let best = creator::contrast(theme.text_primary, fill)
+                .max(creator::contrast(theme.surface, fill));
+            assert!(
+                creator::contrast(mark, fill) >= 3. || creator::contrast(mark, fill) >= best,
+                "{}: the glyph is {:.2}:1 on {fill:?}",
+                available.name,
+                creator::contrast(mark, fill)
+            );
+        }
+        assert_eq!(theme.mark_on(theme.accent), theme.on_accent_mark());
+    }
+}
+
+#[test]
 fn a_mark_on_the_accent_reads_there_in_every_builtin_palette() {
     // The knob of a switch that is on. At least 3:1 against the accent — the
     // contrast WCAG asks of a control — in every palette that ships, and in a

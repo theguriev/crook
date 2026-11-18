@@ -547,8 +547,8 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
         Words::new("Status marks")
             .with_description(
                 "What the mark at the head of a row says the agent's status with: a disc in \
-                 the status colour, or a glyph per state in the same colour, for anyone the \
-                 colour alone says nothing to.",
+                 the status colour with a small glyph in it when the agent wants a look, or a \
+                 larger glyph per state in place of the disc.",
             )
             .with_keywords(&[
                 "dot", "glyph", "icon", "shape", "colour", "color", "blind", "status", "running",
