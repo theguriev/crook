@@ -52924,10 +52924,19 @@ fn a_checkout_s_path_too_long_for_its_row_keeps_its_start_and_its_last_directory
     assert!(path.contains('…'), "{path:?} was not cut at all");
     let mut home = None;
     harness.workspace_update(|workspace, _| home = workspace.home().map(Path::to_path_buf));
-    let whole = crate::git::user_friendly_path(scratch.path(), home.as_deref());
-    let start = path.split('…').next().unwrap_or_default();
+    // Either spelling of the scratch directory, with its separators made
+    // one: git prints a checkout's path with forward slashes on Windows,
+    // where the temporary directory has back slashes and is under the home
+    // directory only in the second spelling.
+    let same_separators = |text: &str| text.replace('\\', "/");
+    let wholes = [
+        crate::git::user_friendly_path(scratch.path(), home.as_deref()),
+        scratch.path().display().to_string(),
+    ]
+    .map(|whole| same_separators(&whole));
+    let start = same_separators(path.split('…').next().unwrap_or_default());
     assert!(
-        !start.is_empty() && whole.starts_with(start),
-        "{path:?} does not start where the path does, {whole:?}"
+        !start.is_empty() && wholes.iter().any(|whole| whole.starts_with(&start)),
+        "{path:?} does not start where the path does, {wholes:?}"
     );
 }
